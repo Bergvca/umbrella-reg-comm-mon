@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Attachment": {
+      "description": "A file attached to the communication.",
+      "properties": {
+        "name": {
+          "description": "Original filename",
+          "title": "Name",
+          "type": "string"
+        },
+        "content_type": {
+          "description": "MIME type (e.g. application/pdf)",
+          "title": "Content Type",
+          "type": "string"
+        },
+        "s3_uri": {
+          "description": "S3 URI where the attachment is stored",
+          "title": "S3 Uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "content_type",
+        "s3_uri"
+      ],
+      "title": "Attachment",
+      "type": "object"
+    },
+    "Channel": {
+      "description": "Communication channel that produced the message.",
+      "enum": [
+        "teams_chat",
+        "teams_calls",
+        "unigy_turret",
+        "bloomberg_chat",
+        "bloomberg_email",
+        "email"
+      ],
+      "title": "Channel",
+      "type": "string"
+    },
+    "Direction": {
+      "description": "Direction of the communication relative to the monitored entity.",
+      "enum": [
+        "inbound",
+        "outbound",
+        "internal"
+      ],
+      "title": "Direction",
+      "type": "string"
+    },
+    "Participant": {
+      "description": "A party involved in the communication.",
+      "properties": {
+        "id": {
+          "description": "Unique identifier for the participant (e.g. email, user ID)",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "description": "Display name",
+          "title": "Name",
+          "type": "string"
+        },
+        "role": {
+          "description": "Role in the conversation (e.g. sender, recipient, participant)",
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "role"
+      ],
+      "title": "Participant",
+      "type": "object"
+    }
+  },
+  "description": "Canonical message format produced by the ingestion API. Every communication — regardless of source channel — is normalized into this schema before being published to Kafka and persisted to S3.",
+  "properties": {
+    "message_id": {
+      "description": "Globally unique message identifier",
+      "title": "Message Id",
+      "type": "string"
+    },
+    "channel": {
+      "$ref": "#/$defs/Channel",
+      "description": "Source communication channel"
+    },
+    "direction": {
+      "$ref": "#/$defs/Direction",
+      "description": "Inbound, outbound, or internal"
+    },
+    "timestamp": {
+      "description": "When the communication occurred (UTC, ISO-8601)",
+      "format": "date-time",
+      "title": "Timestamp",
+      "type": "string"
+    },
+    "participants": {
+      "description": "Parties involved in the communication",
+      "items": {
+        "$ref": "#/$defs/Participant"
+      },
+      "minItems": 1,
+      "title": "Participants",
+      "type": "array"
+    },
+    "body_text": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "null" }
+      ],
+      "default": null,
+      "description": "Text content of the message (null for audio-only)",
+      "title": "Body Text"
+    },
+    "audio_ref": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "null" }
+      ],
+      "default": null,
+      "description": "S3 URI of the audio recording (null for text-only)",
+      "title": "Audio Ref"
+    },
+    "attachments": {
+      "description": "Files attached to the communication",
+      "items": {
+        "$ref": "#/$defs/Attachment"
+      },
+      "title": "Attachments",
+      "type": "array"
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "description": "Channel-specific fields not covered by the canonical schema",
+      "title": "Metadata",
+      "type": "object"
+    }
+  },
+  "required": [
+    "message_id",
+    "channel",
+    "direction",
+    "timestamp",
+    "participants"
+  ],
+  "title": "NormalizedMessage",
+  "type": "object"
+}
