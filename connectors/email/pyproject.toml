@@ -1,0 +1,23 @@
+[project]
+name = "umbrella-email-connector"
+version = "0.1.0"
+description = "Umbrella email connector — two-stage IMAP ingestion with claim-check pattern"
+requires-python = ">=3.11"
+dependencies = [
+    "umbrella-connector-framework",
+    "boto3>=1.35",
+]
+
+[project.scripts]
+umbrella-email = "umbrella_email.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["umbrella_email"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
