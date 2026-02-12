@@ -1,0 +1,23 @@
+[project]
+name = "umbrella-ingestion"
+version = "0.1.0"
+description = "Umbrella ingestion service — normalize parsed messages into canonical schema"
+requires-python = ">=3.11"
+dependencies = [
+    "umbrella-connector-framework",
+    "boto3>=1.35",
+]
+
+[project.scripts]
+umbrella-ingestion = "umbrella_ingestion.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["umbrella_ingestion"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

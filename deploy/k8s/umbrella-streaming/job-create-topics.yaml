@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-create-topics
+  namespace: umbrella-streaming
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: umbrella
+spec:
+  backoffLimit: 5
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kafka-create-topics
+    spec:
+      containers:
+        - name: create-topics
+          image: apache/kafka:4.1.1
+          command: ["/bin/bash", "/scripts/create-topics.sh"]
+          env:
+            - name: KAFKA_BOOTSTRAP
+              value: kafka.umbrella-streaming.svc:9092
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+      volumes:
+        - name: scripts
+          configMap:
+            name: kafka-topic-scripts
+            defaultMode: 0755
+      restartPolicy: OnFailure

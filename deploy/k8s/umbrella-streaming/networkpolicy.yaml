@@ -1,0 +1,33 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kafka-allow-umbrella
+  namespace: umbrella-streaming
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: umbrella
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kafka
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow traffic from any namespace labelled with umbrella-kafka-access=true
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              umbrella-kafka-access: "true"
+      ports:
+        - port: 9092
+          protocol: TCP
+    # Allow inter-broker / controller traffic within the streaming namespace
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kafka
+      ports:
+        - port: 9092
+          protocol: TCP
+        - port: 9093
+          protocol: TCP

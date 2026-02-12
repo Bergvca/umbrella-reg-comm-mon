@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: umbrella-streaming
+  labels:
+    app.kubernetes.io/part-of: umbrella
+    umbrella-kafka-access: "true"

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: umbrella-streaming
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: umbrella
+spec:
+  type: ClusterIP
+  ports:
+    - name: client
+      port: 9092
+      targetPort: 9092
+  selector:
+    app.kubernetes.io/name: kafka

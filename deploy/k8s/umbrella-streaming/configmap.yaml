@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-config
+  namespace: umbrella-streaming
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: umbrella
+data:
+  # Generated once via: /opt/kafka/bin/kafka-storage.sh random-uuid
+  CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-topic-scripts
+  namespace: umbrella-streaming
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: umbrella
+data:
+  create-topics.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    BOOTSTRAP="${KAFKA_BOOTSTRAP:?KAFKA_BOOTSTRAP env var is required}"
+    KAFKA_TOPICS="/opt/kafka/bin/kafka-topics.sh"
+
+    echo "Waiting for Kafka at ${BOOTSTRAP}..."
+    attempts=0
+    max_attempts=30
+    until "${KAFKA_TOPICS}" --bootstrap-server "${BOOTSTRAP}" --list >/dev/null 2>&1; do
+        attempts=$((attempts + 1))
+        if [ "${attempts}" -ge "${max_attempts}" ]; then
+            echo "ERROR: Kafka not reachable after ${max_attempts} attempts"
+            exit 1
+        fi
+        sleep 2
+    done
+    echo "Kafka is ready."
+
+    PARTITIONS=1
+    REPLICATION=1
+
+    TOPICS=(
+        "raw-messages"
+        "parsed-messages"
+        "normalized-messages"
+        "processing-results"
+        "alerts"
+        "dead-letter"
+        "normalized-messages-dlq"
+    )
+
+    for topic in "${TOPICS[@]}"; do
+        echo "Creating topic: ${topic}"
+        "${KAFKA_TOPICS}" \
+            --bootstrap-server "${BOOTSTRAP}" \
+            --create \
+            --if-not-exists \
+            --topic "${topic}" \
+            --partitions "${PARTITIONS}" \
+            --replication-factor "${REPLICATION}"
+    done
+
+    echo "All topics created:"
+    "${KAFKA_TOPICS}" --bootstrap-server "${BOOTSTRAP}" --list
