@@ -22,8 +22,16 @@ class IngestionClient:
     def __init__(self, config: IngestionAPIConfig) -> None:
         self._config = config
         self._client: httpx.AsyncClient | None = None
+        self._started = False
 
     async def start(self) -> None:
+        self._started = True
+
+        # Skip client creation if base_url is empty (disabled mode)
+        if not self._config.base_url:
+            logger.info("ingestion_client_disabled", reason="empty_base_url")
+            return
+
         ssl_context: ssl.SSLContext | bool = False  # no TLS verification by default
 
         if self._config.mtls_cert_path and self._config.mtls_key_path:
@@ -50,9 +58,15 @@ class IngestionClient:
     async def submit(self, message: RawMessage) -> None:
         """POST a raw message to the ingestion API.
 
+        If the client is disabled (base_url was empty), this is a no-op.
         Raises :class:`httpx.HTTPStatusError` on non-2xx responses.
         """
-        assert self._client is not None, "Client not started"
+        if not self._started:
+            raise AssertionError("Client not started")
+
+        if self._client is None:
+            return  # disabled
+
         response = await self._client.post(
             "/v1/ingest",
             content=message.model_dump_json(),

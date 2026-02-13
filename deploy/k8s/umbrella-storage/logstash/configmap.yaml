@@ -1,0 +1,124 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-config
+  namespace: umbrella-storage
+data:
+  logstash.yml: |
+    api.http.host: "0.0.0.0"
+    api.http.port: 9600
+    log.level: info
+    pipeline.ordered: auto
+    config.reload.automatic: true
+    config.reload.interval: 30s
+    xpack.monitoring.enabled: false
+
+  pipelines.yml: |
+    - pipeline.id: messages
+      path.config: "/usr/share/logstash/pipeline/messages.conf"
+      pipeline.workers: 2
+      pipeline.batch.size: 500
+
+    - pipeline.id: alerts
+      path.config: "/usr/share/logstash/pipeline/alerts.conf"
+      pipeline.workers: 1
+      pipeline.batch.size: 250
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-pipelines
+  namespace: umbrella-storage
+data:
+  messages.conf: |
+    input {
+      kafka {
+        bootstrap_servers => "kafka.umbrella-streaming.svc:9092"
+        topics => ["normalized-messages", "processing-results"]
+        group_id => "logstash-messages"
+        codec => "json"
+        decorate_events => "basic"
+        auto_offset_reset => "earliest"
+      }
+    }
+
+    filter {
+      # Parse timestamp for index routing
+      date {
+        match => ["timestamp", "ISO8601"]
+        target => "@timestamp"
+      }
+
+      # Build monthly index suffix from message timestamp
+      ruby {
+        code => '
+          t = event.get("@timestamp")&.time
+          if t
+            event.set("[@metadata][index_suffix]", t.strftime("%Y.%m"))
+          else
+            event.set("[@metadata][index_suffix]", Time.now.utc.strftime("%Y.%m"))
+          end
+        '
+      }
+
+      # Ensure message_id exists for document ID
+      if ![message_id] {
+        drop {}
+      }
+    }
+
+    output {
+      elasticsearch {
+        hosts => ["http://elasticsearch.umbrella-storage.svc:9200"]
+        index => "messages-%{[@metadata][index_suffix]}"
+        document_id => "%{message_id}"
+        action => "update"
+        doc_as_upsert => true
+        retry_on_conflict => 3
+      }
+    }
+
+  alerts.conf: |
+    input {
+      kafka {
+        bootstrap_servers => "kafka.umbrella-streaming.svc:9092"
+        topics => ["alerts"]
+        group_id => "logstash-alerts"
+        codec => "json"
+        auto_offset_reset => "earliest"
+      }
+    }
+
+    filter {
+      date {
+        match => ["timestamp", "ISO8601"]
+        target => "@timestamp"
+      }
+
+      ruby {
+        code => '
+          t = event.get("@timestamp")&.time
+          if t
+            event.set("[@metadata][index_suffix]", t.strftime("%Y.%m"))
+          else
+            event.set("[@metadata][index_suffix]", Time.now.utc.strftime("%Y.%m"))
+          end
+        '
+      }
+
+      # Set default review status
+      if ![review_status] {
+        mutate {
+          add_field => { "review_status" => "pending" }
+        }
+      }
+    }
+
+    output {
+      elasticsearch {
+        hosts => ["http://elasticsearch.umbrella-storage.svc:9200"]
+        index => "alerts-%{[@metadata][index_suffix]}"
+        document_id => "%{[alert_id]}"
+      }
+    }

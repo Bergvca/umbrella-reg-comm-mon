@@ -1,0 +1,128 @@
+{
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "index.lifecycle.name": "umbrella-retention",
+      "index.lifecycle.rollover_alias": "messages"
+    },
+    "mappings": {
+      "properties": {
+        "message_id": {
+          "type": "keyword"
+        },
+        "channel": {
+          "type": "keyword"
+        },
+        "direction": {
+          "type": "keyword"
+        },
+        "timestamp": {
+          "type": "date"
+        },
+        "participants": {
+          "type": "nested",
+          "properties": {
+            "id": {
+              "type": "keyword"
+            },
+            "name": {
+              "type": "text",
+              "fields": {
+                "keyword": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "role": {
+              "type": "keyword"
+            }
+          }
+        },
+        "body_text": {
+          "type": "text",
+          "analyzer": "standard"
+        },
+        "audio_ref": {
+          "type": "keyword"
+        },
+        "attachments": {
+          "type": "nested",
+          "properties": {
+            "name": {
+              "type": "text",
+              "fields": {
+                "keyword": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "content_type": {
+              "type": "keyword"
+            },
+            "s3_uri": {
+              "type": "keyword"
+            }
+          }
+        },
+        "metadata": {
+          "type": "object",
+          "enabled": true
+        },
+        "transcript": {
+          "type": "text",
+          "analyzer": "standard"
+        },
+        "language": {
+          "type": "keyword"
+        },
+        "translated_text": {
+          "type": "text",
+          "analyzer": "standard"
+        },
+        "entities": {
+          "type": "nested",
+          "properties": {
+            "text": {
+              "type": "text",
+              "fields": {
+                "keyword": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "label": {
+              "type": "keyword"
+            },
+            "start": {
+              "type": "integer"
+            },
+            "end": {
+              "type": "integer"
+            }
+          }
+        },
+        "sentiment": {
+          "type": "keyword"
+        },
+        "sentiment_score": {
+          "type": "float"
+        },
+        "risk_score": {
+          "type": "float"
+        },
+        "matched_policies": {
+          "type": "keyword"
+        },
+        "processing_status": {
+          "type": "keyword"
+        }
+      }
+    }
+  },
+  "composed_of": [],
+  "priority": 100,
+  "_meta": {
+    "description": "Index template for normalized messages with enrichments"
+  }
+}

@@ -122,6 +122,40 @@ class TestDeliver:
         assert call_kwargs[0][0] is msg
         assert "down" in call_kwargs[1]["error"]
         assert call_kwargs[1]["attempts"] == connector_config.retry.max_attempts
+        # HTTP client should not be called if Kafka fails
+        c._ingestion_client.submit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_deliver_kafka_succeeds_http_fails(self, connector_config: ConnectorConfig):
+        """When Kafka succeeds but HTTP fails, message is NOT sent to DLQ."""
+        c = FiniteConnector(connector_config, [])
+        c._producer.send_raw = AsyncMock()
+        c._ingestion_client.submit = AsyncMock(side_effect=ConnectionError("api unreachable"))
+        c._dead_letter.send = AsyncMock()
+
+        msg = _make_message()
+        await c._deliver(msg)
+
+        c._producer.send_raw.assert_awaited_once_with(msg)
+        c._ingestion_client.submit.assert_awaited_once_with(msg)
+        # HTTP failure does NOT trigger dead-letter
+        c._dead_letter.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_deliver_with_disabled_http_client(self, connector_config: ConnectorConfig):
+        """When HTTP client is disabled, only Kafka delivery happens."""
+        c = FiniteConnector(connector_config, [])
+        c._producer.send_raw = AsyncMock()
+        # Simulate disabled client (submit is no-op)
+        c._ingestion_client.submit = AsyncMock()
+        c._dead_letter.send = AsyncMock()
+
+        msg = _make_message()
+        await c._deliver(msg)
+
+        c._producer.send_raw.assert_awaited_once_with(msg)
+        c._ingestion_client.submit.assert_awaited_once()
+        c._dead_letter.send.assert_not_awaited()
 
 
 class TestIngestLoop:

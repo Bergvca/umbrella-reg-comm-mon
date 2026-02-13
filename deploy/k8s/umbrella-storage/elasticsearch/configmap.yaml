@@ -1,0 +1,148 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: elasticsearch-config
+  namespace: umbrella-storage
+data:
+  elasticsearch.yml: |
+    cluster.name: umbrella
+    node.name: es-node-0
+    discovery.type: single-node
+
+    network.host: 0.0.0.0
+    http.port: 9200
+
+    xpack.security.enabled: false
+
+    path.data: /usr/share/elasticsearch/data
+    path.logs: /usr/share/elasticsearch/logs
+
+  messages-template.json: |
+    {
+      "template": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0,
+          "index.lifecycle.name": "umbrella-retention",
+          "index.lifecycle.rollover_alias": "messages"
+        },
+        "mappings": {
+          "properties": {
+            "message_id": {"type": "keyword"},
+            "channel": {"type": "keyword"},
+            "direction": {"type": "keyword"},
+            "timestamp": {"type": "date"},
+            "participants": {
+              "type": "nested",
+              "properties": {
+                "id": {"type": "keyword"},
+                "name": {"type": "text","fields": {"keyword": {"type": "keyword"}}},
+                "role": {"type": "keyword"}
+              }
+            },
+            "body_text": {"type": "text","analyzer": "standard"},
+            "audio_ref": {"type": "keyword"},
+            "attachments": {
+              "type": "nested",
+              "properties": {
+                "name": {"type": "text","fields": {"keyword": {"type": "keyword"}}},
+                "content_type": {"type": "keyword"},
+                "s3_uri": {"type": "keyword"}
+              }
+            },
+            "metadata": {"type": "object","enabled": true},
+            "transcript": {"type": "text","analyzer": "standard"},
+            "language": {"type": "keyword"},
+            "translated_text": {"type": "text","analyzer": "standard"},
+            "entities": {
+              "type": "nested",
+              "properties": {
+                "text": {"type": "text","fields": {"keyword": {"type": "keyword"}}},
+                "label": {"type": "keyword"},
+                "start": {"type": "integer"},
+                "end": {"type": "integer"}
+              }
+            },
+            "sentiment": {"type": "keyword"},
+            "sentiment_score": {"type": "float"},
+            "risk_score": {"type": "float"},
+            "matched_policies": {"type": "keyword"},
+            "processing_status": {"type": "keyword"}
+          }
+        }
+      },
+      "composed_of": [],
+      "priority": 100,
+      "_meta": {"description": "Index template for normalized messages with enrichments"}
+    }
+
+  alerts-template.json: |
+    {
+      "template": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0,
+          "index.lifecycle.name": "umbrella-retention",
+          "index.lifecycle.rollover_alias": "alerts"
+        },
+        "mappings": {
+          "properties": {
+            "alert_id": {"type": "keyword"},
+            "message_id": {"type": "keyword"},
+            "channel": {"type": "keyword"},
+            "timestamp": {"type": "date"},
+            "alert_type": {"type": "keyword"},
+            "severity": {"type": "keyword"},
+            "risk_score": {"type": "float"},
+            "matched_policies": {"type": "keyword"},
+            "matched_terms": {"type": "keyword"},
+            "excerpt": {"type": "text"},
+            "participants": {
+              "type": "nested",
+              "properties": {
+                "id": {"type": "keyword"},
+                "name": {"type": "text","fields": {"keyword": {"type": "keyword"}}},
+                "role": {"type": "keyword"}
+              }
+            },
+            "review_status": {"type": "keyword"},
+            "reviewer": {"type": "keyword"},
+            "reviewed_at": {"type": "date"},
+            "disposition": {"type": "keyword"},
+            "notes": {"type": "text"}
+          }
+        }
+      },
+      "composed_of": [],
+      "priority": 100,
+      "_meta": {"description": "Index template for compliance alerts"}
+    }
+
+  ilm-policy.json: |
+    {
+      "policy": "umbrella-retention",
+      "phases": {
+        "hot": {
+          "min_age": "0d",
+          "actions": {}
+        },
+        "warm": {
+          "min_age": "30d",
+          "actions": {
+            "set_priority": {"priority": 50},
+            "forcemerge": {"max_num_segments": 1}
+          }
+        },
+        "cold": {
+          "min_age": "90d",
+          "actions": {
+            "set_priority": {"priority": 0},
+            "searchable_snapshot": {"snapshot_repository": "found-snapshots"}
+          }
+        },
+        "delete": {
+          "min_age": "2555d",
+          "actions": {"delete": {}}
+        }
+      }
+    }

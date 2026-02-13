@@ -1,0 +1,123 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingestion-service
+  namespace: umbrella-ingestion
+  labels:
+    app: ingestion-service
+    component: normalizer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingestion-service
+  template:
+    metadata:
+      labels:
+        app: ingestion-service
+        component: normalizer
+    spec:
+      containers:
+      - name: ingestion
+        image: umbrella-ingestion:latest
+        imagePullPolicy: Never  # Use local image (minikube)
+        ports:
+        - name: health
+          containerPort: 8082
+          protocol: TCP
+        - name: api
+          containerPort: 8000
+          protocol: TCP
+        env:
+        # Kafka configuration
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: kafka.umbrella-streaming.svc:9092
+        - name: KAFKA_SOURCE_TOPIC
+          value: parsed-messages
+        - name: KAFKA_OUTPUT_TOPIC
+          value: normalized-messages
+        - name: KAFKA_CONSUMER_GROUP
+          value: ingestion-normalizer
+        - name: KAFKA_DEAD_LETTER_TOPIC
+          value: normalized-messages-dlq
+        - name: KAFKA_PRODUCER_ACKS
+          value: all
+        - name: KAFKA_PRODUCER_COMPRESSION
+          value: gzip
+
+        # S3 configuration (MinIO)
+        - name: S3_BUCKET
+          value: umbrella
+        - name: S3_PREFIX
+          value: normalized
+        - name: S3_ENDPOINT_URL
+          value: http://minio.umbrella-storage.svc:9000
+        - name: S3_REGION
+          value: us-east-1
+        - name: AWS_ACCESS_KEY_ID
+          value: minioadmin
+        - name: AWS_SECRET_ACCESS_KEY
+          value: minioadmin
+
+        # Ingestion service configuration
+        - name: INGESTION_HEALTH_PORT
+          value: "8082"
+        - name: INGESTION_API_PORT
+          value: "8000"
+        - name: INGESTION_MONITORED_DOMAINS
+          value: '["example.com","acme.com"]'
+
+        # Logging
+        - name: LOG_LEVEL
+          value: INFO
+        - name: LOG_FORMAT
+          value: json
+
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8082
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingestion-service
+  namespace: umbrella-ingestion
+  labels:
+    app: ingestion-service
+spec:
+  type: ClusterIP
+  ports:
+  - name: health
+    port: 8082
+    targetPort: 8082
+    protocol: TCP
+  - name: api
+    port: 8000
+    targetPort: 8000
+    protocol: TCP
+  selector:
+    app: ingestion-service

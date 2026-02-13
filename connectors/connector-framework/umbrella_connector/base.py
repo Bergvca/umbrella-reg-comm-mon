@@ -54,19 +54,24 @@ class BaseConnector(ConnectorInterface):
     # ------------------------------------------------------------------
 
     async def _deliver(self, message: RawMessage) -> None:
-        """Deliver a single message to Kafka + ingestion API with retry."""
+        """Deliver a single message to Kafka (required) and ingestion API (best-effort).
+
+        Kafka delivery is retried on failure; if all retries are exhausted, the
+        message is sent to the dead-letter queue. HTTP ingestion API delivery is
+        best-effort and will not block Kafka delivery.
+        """
+        # Kafka delivery (required, with retry)
         retry_decorator = with_retry(self.config.retry)
 
         @retry_decorator
-        async def _attempt() -> None:
+        async def _send_kafka() -> None:
             await self._producer.send_raw(message)
-            await self._ingestion_client.submit(message)
 
         try:
-            await _attempt()
+            await _send_kafka()
         except Exception as exc:
             logger.error(
-                "delivery_failed_permanently",
+                "kafka_delivery_failed_permanently",
                 raw_message_id=message.raw_message_id,
                 error=str(exc),
             )
@@ -74,6 +79,17 @@ class BaseConnector(ConnectorInterface):
                 message,
                 error=str(exc),
                 attempts=self.config.retry.max_attempts,
+            )
+            return
+
+        # HTTP ingestion API (best-effort, skip if disabled or on failure)
+        try:
+            await self._ingestion_client.submit(message)
+        except Exception as exc:
+            logger.warning(
+                "ingestion_api_submit_failed",
+                raw_message_id=message.raw_message_id,
+                error=str(exc),
             )
 
     # ------------------------------------------------------------------

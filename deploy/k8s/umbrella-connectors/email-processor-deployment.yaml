@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: email-processor
+  namespace: umbrella-connectors
+  labels:
+    app: email-processor
+    component: processor
+    channel: email
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: email-processor
+  template:
+    metadata:
+      labels:
+        app: email-processor
+        component: processor
+        channel: email
+    spec:
+      containers:
+      - name: processor
+        image: umbrella-email:latest
+        imagePullPolicy: Never  # Use local image (minikube)
+        command:
+        - python
+        - -m
+        - umbrella_email
+        - processor
+        ports:
+        - name: health
+          containerPort: 8081
+          protocol: TCP
+        env:
+        # Kafka configuration
+        - name: PROCESSOR_KAFKA_BOOTSTRAP_SERVERS
+          value: kafka.umbrella-streaming.svc:9092
+        - name: PROCESSOR_SOURCE_TOPIC
+          value: raw-messages
+        - name: PROCESSOR_OUTPUT_TOPIC
+          value: parsed-messages
+
+        # S3 configuration (MinIO)
+        - name: S3_BUCKET
+          value: umbrella
+        - name: S3_ENDPOINT_URL
+          value: http://minio.umbrella-storage.svc:9000
+        - name: AWS_ACCESS_KEY_ID
+          value: minioadmin
+        - name: AWS_SECRET_ACCESS_KEY
+          value: minioadmin
+
+        # Processor configuration
+        - name: PROCESSOR_HEALTH_PORT
+          value: "8081"
+        - name: PROCESSOR_CONSUMER_GROUP
+          value: email-processor
+
+        # Logging
+        - name: LOG_LEVEL
+          value: INFO
+        - name: LOG_FORMAT
+          value: json
+
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8081
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8081
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: email-processor
+  namespace: umbrella-connectors
+  labels:
+    app: email-processor
+spec:
+  type: ClusterIP
+  ports:
+  - name: health
+    port: 8081
+    targetPort: 8081
+    protocol: TCP
+  selector:
+    app: email-processor

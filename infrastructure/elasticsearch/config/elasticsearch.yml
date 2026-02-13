@@ -1,0 +1,11 @@
+cluster.name: umbrella
+node.name: es-node-0
+discovery.type: single-node
+
+network.host: 0.0.0.0
+http.port: 9200
+
+xpack.security.enabled: false
+
+path.data: /usr/share/elasticsearch/data
+path.logs: /usr/share/elasticsearch/logs

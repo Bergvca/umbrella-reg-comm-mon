@@ -1,0 +1,37 @@
+{
+  "policy": "umbrella-retention",
+  "phases": {
+    "hot": {
+      "min_age": "0d",
+      "actions": {}
+    },
+    "warm": {
+      "min_age": "30d",
+      "actions": {
+        "set_priority": {
+          "priority": 50
+        },
+        "forcemerge": {
+          "max_num_segments": 1
+        }
+      }
+    },
+    "cold": {
+      "min_age": "90d",
+      "actions": {
+        "set_priority": {
+          "priority": 0
+        },
+        "searchable_snapshot": {
+          "snapshot_repository": "found-snapshots"
+        }
+      }
+    },
+    "delete": {
+      "min_age": "2555d",
+      "actions": {
+        "delete": {}
+      }
+    }
+  }
+}

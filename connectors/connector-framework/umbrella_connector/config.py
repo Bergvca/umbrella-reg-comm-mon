@@ -60,8 +60,8 @@ class IngestionAPIConfig(BaseSettings):
     model_config = {"env_prefix": "INGESTION_API_"}
 
     base_url: str = Field(
-        default="http://ingestion-api:8000",
-        description="Base URL of the ingestion API",
+        default="",
+        description="Base URL of the ingestion API (empty to disable)",
     )
     timeout_seconds: float = Field(default=30.0, description="HTTP request timeout")
     mtls_cert_path: str | None = Field(

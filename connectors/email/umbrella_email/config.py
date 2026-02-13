@@ -77,6 +77,10 @@ class EmailProcessorConfig(BaseSettings):
         default="email-processor",
         description="Kafka consumer group ID",
     )
+    auto_offset_reset: str = Field(
+        default="earliest",
+        description="Kafka auto offset reset policy",
+    )
     health_port: int = Field(
         default=8081,
         description="Port for K8s health probe endpoints",

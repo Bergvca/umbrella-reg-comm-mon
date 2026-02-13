@@ -1,0 +1,89 @@
+Return-Path: <alice.smith@example.com>
+Delivered-To: bob.jones@acme.com
+Received: from mail.example.com ([192.168.1.100])
+	by mx.acme.com with ESMTPS id abc123
+	for <bob.jones@acme.com>; Wed, 12 Feb 2026 14:35:22 +0000
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;
+	d=example.com; s=default;
+	h=from:to:subject:date:message-id:mime-version;
+	bh=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=;
+	b=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789...
+From: Alice Smith <alice.smith@example.com>
+To: Bob Jones <bob.jones@acme.com>
+Cc: carol.white@acme.com
+Subject: Q1 2026 Compliance Report - Review Required
+Date: Wed, 12 Feb 2026 14:35:20 +0000
+Message-ID: <20260212143520.12345@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed;
+	boundary="----=_Part_123456_789012345.1707748520123"
+
+------=_Part_123456_789012345.1707748520123
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Hi Bob,
+
+Please find attached the Q1 2026 compliance report for your review.
+
+Key highlights:
+- All regulatory requirements met
+- No outstanding action items
+- Monitoring coverage at 98.5%
+
+Please review by end of week and let me know if you have any questions.
+
+Thanks,
+Alice
+
+------=_Part_123456_789012345.1707748520123
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset=3D"UTF-8">
+</head>
+<body>
+<p>Hi Bob,</p>
+
+<p>Please find attached the <strong>Q1 2026 compliance report</strong> for=
+ your review.</p>
+
+<p><strong>Key highlights:</strong></p>
+<ul>
+  <li>All regulatory requirements met</li>
+  <li>No outstanding action items</li>
+  <li>Monitoring coverage at 98.5%</li>
+</ul>
+
+<p>Please review by end of week and let me know if you have any questions.<=
+/p>
+
+<p>Thanks,<br>
+Alice</p>
+</body>
+</html>
+
+------=_Part_123456_789012345.1707748520123
+Content-Type: application/pdf; name="Q1-2026-Compliance-Report.pdf"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="Q1-2026-Compliance-Report.pdf"
+
+JVBERi0xLjQKJeLjz9MKMyAwIG9iago8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL1Jlc291cmNl
+cyA0IDAgUi9NZWRpYUJveFswIDAgNjEyIDc5Ml0vR3JvdXA8PC9TL1RyYW5zcGFyZW5jeS9DUy9E
+ZXZpY2VSR0IvSSB0cnVlPj4vQ29udGVudHMgNSAwIFI+PgplbmRvYmoKNSAwIG9iagpzdHJlYW0K
+L1RqIEJUCi9GMSAxMiBUZgoxMDAgNzAwIFRkCihRMSAyMDI2IENvbXBsaWFuY2UgUmVwb3J0KSBU
+agpFVAovVGogQlQKL0YxIDEwIFRmCjEwMCA2NTAgVGQKKFRoaXMgaXMgYSBzYW1wbGUgUERGIGF0
+dGFjaG1lbnQgZm9yIHRlc3RpbmcuKSBUagpFVAplbmRzdHJlYW0KZW5kb2JqCjEgMCBvYmoKPDwv
+VHlwZS9QYWdlcy9LaWRzWzMgMCBSXS9Db3VudCAxPj4KZW5kb2JqCjQgMCBvYmoKPDwvRm9udDw8
+L0YxIDYgMCBSPj4+PgplbmRvYmoKNiAwIG9iago8PC9UeXBlL0ZvbnQvU3VidHlwZS9UeXBlMS9C
+YXNlRm9udC9UaW1lcy1Sb21hbj4+CmVuZG9iago3IDAgb2JqCjw8L1R5cGUvQ2F0YWxvZy9QYWdl
+cyAxIDAgUj4+CmVuZG9iagp4cmVmCjAgOAowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDA0Mjgg
+MDAwMDAgbiAKMDAwMDAwMDAwMCAwMDAwMCBmIAowMDAwMDAwMDE1IDAwMDAwIG4gCjAwMDAwMDA0
+NzYgMDAwMDAgbiAKMDAwMDAwMDE1NCAwMDAwMCBuIAowMDAwMDAwNTA4IDAwMDAwIG4gCjAwMDAw
+MDA1NzggMDAwMDAgbiAKdHJhaWxlcgo8PC9TaXplIDgvUm9vdCA3IDAgUj4+CnN0YXJ0eHJlZgo2
+MjcKJSVFT0YK
+
+------=_Part_123456_789012345.1707748520123--

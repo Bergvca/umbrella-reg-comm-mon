@@ -56,8 +56,8 @@ class EmailProcessor:
             self._config.source_topic,
             bootstrap_servers=self._config.kafka_bootstrap_servers,
             group_id=self._config.consumer_group,
-            value_deserializer=lambda v: json.loads(v.decode("utf-8")),
             enable_auto_commit=False,
+            auto_offset_reset=self._config.auto_offset_reset,
         )
         self._producer = AIOKafkaProducer(
             bootstrap_servers=self._config.kafka_bootstrap_servers,
@@ -93,7 +93,12 @@ class EmailProcessor:
             if self._shutdown_event.is_set():
                 break
 
-            raw_message = msg.value
+            try:
+                raw_message = json.loads(msg.value.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                logger.warning("email_processor_invalid_json", offset=msg.offset)
+                await self._consumer.commit()
+                continue
             # Filter: only process email channel with eml_ref format
             if raw_message.get("channel") != "email":
                 await self._consumer.commit()

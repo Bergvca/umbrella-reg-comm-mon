@@ -1,0 +1,7 @@
+http.host: "0.0.0.0"
+http.port: 9600
+log.level: info
+pipeline.ordered: auto
+config.reload.automatic: true
+config.reload.interval: 30s
+xpack.monitoring.enabled: false

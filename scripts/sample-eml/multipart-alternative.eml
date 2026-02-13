@@ -1,0 +1,53 @@
+From: marketing@example.com
+To: team@acme.com
+Subject: Monthly Newsletter - February 2026
+Date: Fri, 14 Feb 2026 12:00:00 +0000
+Message-ID: <newsletter-202602@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/alternative;
+	boundary="----=_Alt_123456789"
+
+------=_Alt_123456789
+Content-Type: text/plain; charset=UTF-8
+
+MONTHLY NEWSLETTER - FEBRUARY 2026
+
+Welcome to our February newsletter!
+
+Key Updates:
+- New compliance features launched
+- System uptime: 99.9%
+- 50+ new customers onboarded
+
+Read more at: https://example.com/newsletter/202602
+
+------=_Alt_123456789
+Content-Type: text/html; charset=UTF-8
+
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+body { font-family: Arial, sans-serif; }
+.header { background-color: #003366; color: white; padding: 20px; }
+.content { padding: 20px; }
+</style>
+</head>
+<body>
+<div class="header">
+<h1>Monthly Newsletter - February 2026</h1>
+</div>
+<div class="content">
+<p>Welcome to our February newsletter!</p>
+<h2>Key Updates:</h2>
+<ul>
+<li>New compliance features launched</li>
+<li>System uptime: 99.9%</li>
+<li>50+ new customers onboarded</li>
+</ul>
+<p><a href="https://example.com/newsletter/202602">Read more online</a></p>
+</div>
+</body>
+</html>
+
+------=_Alt_123456789--

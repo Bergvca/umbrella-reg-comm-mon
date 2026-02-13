@@ -1,0 +1,83 @@
+{
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "index.lifecycle.name": "umbrella-retention",
+      "index.lifecycle.rollover_alias": "alerts"
+    },
+    "mappings": {
+      "properties": {
+        "alert_id": {
+          "type": "keyword"
+        },
+        "message_id": {
+          "type": "keyword"
+        },
+        "channel": {
+          "type": "keyword"
+        },
+        "timestamp": {
+          "type": "date"
+        },
+        "alert_type": {
+          "type": "keyword"
+        },
+        "severity": {
+          "type": "keyword"
+        },
+        "risk_score": {
+          "type": "float"
+        },
+        "matched_policies": {
+          "type": "keyword"
+        },
+        "matched_terms": {
+          "type": "keyword"
+        },
+        "excerpt": {
+          "type": "text"
+        },
+        "participants": {
+          "type": "nested",
+          "properties": {
+            "id": {
+              "type": "keyword"
+            },
+            "name": {
+              "type": "text",
+              "fields": {
+                "keyword": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "role": {
+              "type": "keyword"
+            }
+          }
+        },
+        "review_status": {
+          "type": "keyword"
+        },
+        "reviewer": {
+          "type": "keyword"
+        },
+        "reviewed_at": {
+          "type": "date"
+        },
+        "disposition": {
+          "type": "keyword"
+        },
+        "notes": {
+          "type": "text"
+        }
+      }
+    }
+  },
+  "composed_of": [],
+  "priority": 100,
+  "_meta": {
+    "description": "Index template for compliance alerts"
+  }
+}

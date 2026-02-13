@@ -59,7 +59,7 @@ class TestRetryConfig:
 class TestIngestionAPIConfig:
     def test_defaults(self):
         cfg = IngestionAPIConfig()
-        assert cfg.base_url == "http://ingestion-api:8000"
+        assert cfg.base_url == ""  # empty by default (disabled)
         assert cfg.timeout_seconds == 30.0
         assert cfg.mtls_cert_path is None
         assert cfg.mtls_key_path is None
