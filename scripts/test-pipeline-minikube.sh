@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # End-to-end pipeline test in minikube
 #
+# Tests the full 4-stage pipeline:
+#   Stage 1: IMAP Connector (EmailConnector polls mailserver via IMAP)
+#   Stage 2: Email Processor (parse EML from S3)
+#   Stage 3: Ingestion Service (normalize parsed message)
+#   Stage 4: Logstash → Elasticsearch (index normalized message)
+#
 # NOTE: This script skips optional monitoring resources (PodMonitor, ServiceMonitor)
 # that require Prometheus Operator. The pipeline works fine without them.
 set -e
@@ -44,9 +50,10 @@ fi
 info "Configuring Docker to use minikube's daemon..."
 eval $(minikube docker-env)
 
-# 3. Build Python service images
+# 3. Build Python service images (with --no-cache to pick up code changes)
 info "Building Docker images..."
-./scripts/build-images.sh
+docker build --no-cache -f connectors/email/Dockerfile -t umbrella-email:latest .
+docker build --no-cache -f ingestion-api/Dockerfile -t umbrella-ingestion:latest .
 
 # 4. Deploy infrastructure (order matters — dependencies first)
 info "Deploying umbrella-streaming (Kafka)..."
@@ -78,13 +85,27 @@ info "Deploying Logstash..."
 kubectl apply -f deploy/k8s/umbrella-storage/logstash/
 kubectl rollout status deployment/logstash -n umbrella-storage --timeout=300s
 
-# 5. Deploy Python services
-info "Deploying email-processor..."
+info "Deploying Kibana..."
+kubectl apply -f deploy/k8s/umbrella-storage/kibana/
+kubectl rollout status deployment/kibana -n umbrella-storage --timeout=300s
+
+# 5. Deploy mailserver (SMTP/IMAP for Stage 1)
+info "Deploying mailserver..."
 kubectl apply -f deploy/k8s/umbrella-connectors/namespace.yaml
-kubectl apply -f deploy/k8s/umbrella-connectors/
+kubectl apply -f deploy/k8s/umbrella-connectors/mailserver-deployment.yaml
+info "Waiting for mailserver to be ready..."
+kubectl rollout status deployment/mailserver -n umbrella-connectors --timeout=300s
+
+# 6. Deploy Python services
+info "Deploying email-processor (Stage 2)..."
+kubectl apply -f deploy/k8s/umbrella-connectors/email-processor-deployment.yaml
 kubectl wait --for=condition=ready pod -l app=email-processor -n umbrella-connectors --timeout=300s
 
-info "Deploying ingestion-service..."
+info "Deploying email-connector (Stage 1)..."
+kubectl apply -f deploy/k8s/umbrella-connectors/email-connector-deployment.yaml
+kubectl wait --for=condition=ready pod -l app=email-connector -n umbrella-connectors --timeout=300s
+
+info "Deploying ingestion-service (Stage 3)..."
 kubectl apply -f deploy/k8s/umbrella-ingestion/namespace.yaml
 kubectl apply -f deploy/k8s/umbrella-ingestion/
 kubectl wait --for=condition=ready pod -l app=ingestion-service -n umbrella-ingestion --timeout=120s
@@ -92,93 +113,37 @@ kubectl wait --for=condition=ready pod -l app=ingestion-service -n umbrella-inge
 info "All services deployed successfully!"
 echo ""
 
-# 6. Wait a bit for services to stabilize
+# 7. Wait a bit for services to stabilize
 info "Waiting 10 seconds for services to stabilize..."
 sleep 10
 
-# 7. Upload test EML to MinIO
-info "Uploading test EML file to MinIO..."
+# 8. Send test email via SMTP to mailserver
+info "Sending test email via SMTP..."
+kubectl delete pod smtp-sender -n umbrella-connectors --ignore-not-found 2>/dev/null || true
+kubectl run smtp-sender --rm -i --image=umbrella-email:latest --image-pull-policy=Never \
+  -n umbrella-connectors --restart=Never -- \
+  python3 -c "
+import smtplib
+from email.message import EmailMessage
 
-# Create test EML content
-TEST_EML_PATH="/tmp/test-email-001.eml"
-cat > "$TEST_EML_PATH" << 'EOF'
-From: alice@example.com
-To: bob@acme.com
-Subject: Test Email - Pipeline Validation
-Date: Wed, 12 Feb 2026 10:00:00 +0000
-Message-ID: <test-001@example.com>
-Content-Type: text/plain; charset=utf-8
+msg = EmailMessage()
+msg['From'] = 'alice@example.com'
+msg['To'] = 'testuser@umbrella.local'
+msg['Subject'] = 'Pipeline Test - E2E Validation'
+msg['Message-ID'] = '<pipeline-test-001@example.com>'
+msg.set_content('Test email for pipeline validation. If this appears in Elasticsearch, all 4 stages work.')
 
-This is a test email message for validating the Umbrella pipeline.
+with smtplib.SMTP('mailserver.umbrella-connectors.svc', 25) as s:
+    s.send_message(msg)
+    print('Email sent successfully')
+"
 
-The message should flow through:
-1. Email Processor (parse EML)
-2. Ingestion Service (normalize)
-3. Logstash (index)
-4. Elasticsearch (store)
-
-If you can search for this in Elasticsearch, the pipeline is working!
-
---
-Test Message
-EOF
-
-# Upload to MinIO using kubectl run with mc client
-info "Creating MinIO bucket and uploading test EML..."
-kubectl delete pod mc-upload -n umbrella-storage --ignore-not-found
-kubectl run mc-upload --rm -i --image=minio/mc -n umbrella-storage \
-  --command -- /bin/sh -c \
-  "mc alias set local http://minio:9000 minioadmin minioadmin && \
-   mc mb --ignore-existing local/umbrella/raw/email && \
-   cat | mc pipe local/umbrella/raw/email/test-001.eml" < "$TEST_EML_PATH"
-
-info "Test EML uploaded to s3://umbrella/raw/email/test-001.eml"
-
-# 8. Inject test RawMessage to raw-messages topic
-info "Injecting RawMessage to Kafka raw-messages topic..."
-kubectl delete pod kafka-producer -n umbrella-streaming --ignore-not-found
-
-# Create RawMessage JSON
-TEST_MESSAGE=$(cat <<EOF
-{
-  "raw_message_id": "test-001",
-  "channel": "email",
-  "raw_payload": {
-    "envelope": {
-      "message_id": "<test-001@example.com>",
-      "subject": "Test Email - Pipeline Validation",
-      "from": "alice@example.com",
-      "to": ["bob@acme.com"],
-      "cc": [],
-      "bcc": [],
-      "date": "Wed, 12 Feb 2026 10:00:00 +0000"
-    },
-    "s3_uri": "s3://umbrella/raw/email/test-001.eml",
-    "size_bytes": 500
-  },
-  "raw_format": "eml_ref",
-  "metadata": {
-    "imap_uid": "1",
-    "mailbox": "INBOX",
-    "imap_host": "test"
-  },
-  "ingested_at": "2026-02-12T10:00:00Z"
-}
-EOF
-)
-
-# Compact to single line so kafka-console-producer sends it as one message
-TEST_MESSAGE_COMPACT=$(echo "$TEST_MESSAGE" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)))")
-
-kubectl run kafka-producer --rm -i --image=apache/kafka:4.1.1 -n umbrella-streaming -- \
-  sh -c "/opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:9092 --topic raw-messages" <<< "$TEST_MESSAGE_COMPACT"
-
-info "RawMessage injected to raw-messages topic"
+info "Test email sent to testuser@umbrella.local"
 echo ""
 
-# 9. Wait for pipeline to process (give it 30 seconds)
-info "Waiting 30 seconds for pipeline to process the message..."
-for i in {30..1}; do
+# 9. Wait for pipeline to process (45s for 4-stage propagation)
+info "Waiting 45 seconds for pipeline to process the message..."
+for i in {45..1}; do
     echo -ne "\rWaiting... ${i}s "
     sleep 1
 done
@@ -189,9 +154,22 @@ echo ""
 info "Verifying message flow through pipeline..."
 echo ""
 
-# Check parsed-messages topic
-info "Checking parsed-messages topic..."
-kubectl delete pod kafka-check-parsed kafka-check-normalized -n umbrella-streaming --ignore-not-found 2>/dev/null || true
+# Check raw-messages topic (Stage 1 output)
+info "Checking raw-messages topic (Stage 1)..."
+kubectl delete pod kafka-check-raw kafka-check-parsed kafka-check-normalized -n umbrella-streaming --ignore-not-found 2>/dev/null || true
+RAW_COUNT=$(kubectl run kafka-check-raw --rm -i --image=apache/kafka:4.1.1 -n umbrella-streaming -- \
+  /opt/kafka/bin/kafka-get-offsets.sh \
+  --bootstrap-server kafka:9092 \
+  --topic raw-messages 2>/dev/null | awk -F':' '{sum += $3} END {print sum+0}')
+
+if [ "$RAW_COUNT" -gt 0 ]; then
+    info "✓ Found $RAW_COUNT message(s) in raw-messages topic"
+else
+    warn "✗ No messages found in raw-messages topic"
+fi
+
+# Check parsed-messages topic (Stage 2 output)
+info "Checking parsed-messages topic (Stage 2)..."
 PARSED_COUNT=$(kubectl run kafka-check-parsed --rm -i --image=apache/kafka:4.1.1 -n umbrella-streaming -- \
   /opt/kafka/bin/kafka-get-offsets.sh \
   --bootstrap-server kafka:9092 \
@@ -203,8 +181,8 @@ else
     warn "✗ No messages found in parsed-messages topic"
 fi
 
-# Check normalized-messages topic
-info "Checking normalized-messages topic..."
+# Check normalized-messages topic (Stage 3 output)
+info "Checking normalized-messages topic (Stage 3)..."
 NORMALIZED_COUNT=$(kubectl run kafka-check-normalized --rm -i --image=apache/kafka:4.1.1 -n umbrella-streaming -- \
   /opt/kafka/bin/kafka-get-offsets.sh \
   --bootstrap-server kafka:9092 \
@@ -216,15 +194,15 @@ else
     warn "✗ No messages found in normalized-messages topic"
 fi
 
-# Check Elasticsearch
-info "Checking Elasticsearch..."
+# Check Elasticsearch (Stage 4 output)
+info "Checking Elasticsearch (Stage 4)..."
 info "Port-forwarding Elasticsearch..."
 kubectl port-forward -n umbrella-storage svc/elasticsearch 9200:9200 >/dev/null 2>&1 &
 PF_PID=$!
 sleep 5
 
 # Query Elasticsearch
-ES_RESULT=$(curl -s http://localhost:9200/messages-*/_search?q=test-001 | jq -r '.hits.total.value // 0' 2>/dev/null || echo "0")
+ES_RESULT=$(curl -s http://localhost:9200/messages-*/_search?q=pipeline-test-001 | jq -r '.hits.total.value // 0' 2>/dev/null || echo "0")
 
 kill $PF_PID 2>/dev/null || true
 
@@ -238,21 +216,23 @@ echo ""
 echo "=========================================="
 echo "Pipeline Test Summary"
 echo "=========================================="
-echo "Stage 1 (IMAP Connector):    [SKIPPED - no IMAP server]"
+echo "Stage 1 (IMAP Connector):    $([ "$RAW_COUNT" -gt 0 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "Stage 2 (Email Processor):   $([ "$PARSED_COUNT" -gt 0 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "Stage 3 (Ingestion Service): $([ "$NORMALIZED_COUNT" -gt 0 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "Stage 4 (Logstash → ES):     $([ "$ES_RESULT" -gt 0 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "=========================================="
 echo ""
 
-if [ "$PARSED_COUNT" -gt 0 ] && [ "$NORMALIZED_COUNT" -gt 0 ] && [ "$ES_RESULT" -gt 0 ]; then
-    info "✓ PIPELINE TEST PASSED - All stages working!"
+if [ "$RAW_COUNT" -gt 0 ] && [ "$PARSED_COUNT" -gt 0 ] && [ "$NORMALIZED_COUNT" -gt 0 ] && [ "$ES_RESULT" -gt 0 ]; then
+    info "✓ PIPELINE TEST PASSED - All 4 stages working!"
     echo ""
-    info "To explore the data:"
-    echo "  kubectl port-forward -n umbrella-storage svc/elasticsearch 9200:9200"
-    echo "  curl http://localhost:9200/messages-*/_search?pretty"
+    info "To explore the data in Kibana:"
+    echo "  kubectl port-forward -n umbrella-storage svc/kibana 5601:5601"
+    echo "  Open http://localhost:5601 in your browser"
+    echo "  (Index pattern: messages-*)"
     echo ""
     info "To view logs:"
+    echo "  kubectl logs -n umbrella-connectors -l app=email-connector -f"
     echo "  kubectl logs -n umbrella-connectors -l app=email-processor -f"
     echo "  kubectl logs -n umbrella-ingestion -l app=ingestion-service -f"
     echo "  kubectl logs -n umbrella-storage -l app=logstash -f"
@@ -261,6 +241,7 @@ else
     error "✗ PIPELINE TEST FAILED - Check logs for errors"
     echo ""
     error "Debugging steps:"
+    echo "  kubectl logs -n umbrella-connectors -l app=email-connector --tail=50"
     echo "  kubectl logs -n umbrella-connectors -l app=email-processor --tail=50"
     echo "  kubectl logs -n umbrella-ingestion -l app=ingestion-service --tail=50"
     echo "  kubectl logs -n umbrella-storage -l app=logstash --tail=50"

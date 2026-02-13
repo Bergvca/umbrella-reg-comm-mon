@@ -1,0 +1,139 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mailserver-accounts
+  namespace: umbrella-connectors
+data:
+  postfix-accounts.cf: |
+    testuser@umbrella.local|{SHA512-CRYPT}$6$H8a6llWh1VvQaEX0$rsaBu6Dl6Lk.cnzuFmLNhZxP5BdLU65s1F3MHAcZZJGHCnBZE.kPuuSsX3dIuxq3AJzw9gAtFYt8MDjoRzrwZ/
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mailserver
+  namespace: umbrella-connectors
+  labels:
+    app: mailserver
+    component: infrastructure
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mailserver
+  template:
+    metadata:
+      labels:
+        app: mailserver
+        component: infrastructure
+    spec:
+      containers:
+      - name: mailserver
+        image: ghcr.io/docker-mailserver/docker-mailserver:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: smtp
+          containerPort: 25
+          protocol: TCP
+        - name: imap
+          containerPort: 143
+          protocol: TCP
+        env:
+        # Disable unnecessary features for dev/test
+        - name: ENABLE_RSPAMD
+          value: "0"
+        - name: ENABLE_CLAMAV
+          value: "0"
+        - name: ENABLE_FAIL2BAN
+          value: "0"
+        - name: ENABLE_AMAVIS
+          value: "0"
+        - name: ENABLE_OPENDKIM
+          value: "0"
+        - name: ENABLE_OPENDMARC
+          value: "0"
+        - name: ENABLE_POLICYD_SPF
+          value: "0"
+        - name: ENABLE_SPAMASSASSIN
+          value: "0"
+        - name: ENABLE_POSTGREY
+          value: "0"
+
+        # Disable TLS for dev/test
+        - name: SSL_TYPE
+          value: ""
+
+        # Allow plaintext auth from within the cluster
+        - name: PERMIT_DOCKER
+          value: "connected-networks"
+
+        # Hostname
+        - name: OVERRIDE_HOSTNAME
+          value: "mail.umbrella.local"
+
+        # Disable updates check
+        - name: ENABLE_UPDATE_CHECK
+          value: "0"
+
+        # Use Dovecot for IMAP
+        - name: SMTP_ONLY
+          value: "0"
+
+        # One mail account will be created via setup after pod is ready
+        - name: LOG_LEVEL
+          value: "debug"
+
+        volumeMounts:
+        - name: mailserver-config
+          mountPath: /tmp/docker-mailserver
+
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+
+        readinessProbe:
+          tcpSocket:
+            port: 143
+          initialDelaySeconds: 45
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 24
+
+        livenessProbe:
+          tcpSocket:
+            port: 25
+          initialDelaySeconds: 90
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 5
+
+      volumes:
+      - name: mailserver-config
+        configMap:
+          name: mailserver-accounts
+
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mailserver
+  namespace: umbrella-connectors
+  labels:
+    app: mailserver
+spec:
+  type: ClusterIP
+  ports:
+  - name: smtp
+    port: 25
+    targetPort: 25
+    protocol: TCP
+  - name: imap
+    port: 143
+    targetPort: 143
+    protocol: TCP
+  selector:
+    app: mailserver

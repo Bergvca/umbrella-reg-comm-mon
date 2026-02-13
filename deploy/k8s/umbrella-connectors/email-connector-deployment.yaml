@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: email-connector
+  namespace: umbrella-connectors
+  labels:
+    app: email-connector
+    component: connector
+    channel: email
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: email-connector
+  template:
+    metadata:
+      labels:
+        app: email-connector
+        component: connector
+        channel: email
+    spec:
+      containers:
+      - name: connector
+        image: umbrella-email:latest
+        imagePullPolicy: Never  # Use local image (minikube)
+        command:
+        - python
+        - -m
+        - umbrella_email
+        - connector
+        ports:
+        - name: health
+          containerPort: 8080
+          protocol: TCP
+        env:
+        # IMAP configuration (mailserver in same namespace)
+        - name: IMAP_HOST
+          value: mailserver.umbrella-connectors.svc
+        - name: IMAP_PORT
+          value: "143"
+        - name: IMAP_USE_SSL
+          value: "false"
+        - name: IMAP_USERNAME
+          value: testuser@umbrella.local
+        - name: IMAP_PASSWORD
+          value: testpass123
+        - name: IMAP_MAILBOX
+          value: INBOX
+        - name: IMAP_POLL_INTERVAL_SECONDS
+          value: "5"
+
+        # Connector configuration
+        - name: CONNECTOR_NAME
+          value: email
+        - name: CONNECTOR_HEALTH_PORT
+          value: "8080"
+
+        # Kafka configuration
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: kafka.umbrella-streaming.svc:9092
+
+        # S3 configuration (MinIO)
+        - name: S3_BUCKET
+          value: umbrella
+        - name: S3_ENDPOINT_URL
+          value: http://minio.umbrella-storage.svc:9000
+        - name: AWS_ACCESS_KEY_ID
+          value: minioadmin
+        - name: AWS_SECRET_ACCESS_KEY
+          value: minioadmin
+
+        # Logging
+        - name: LOG_LEVEL
+          value: INFO
+        - name: LOG_FORMAT
+          value: json
+
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: email-connector
+  namespace: umbrella-connectors
+  labels:
+    app: email-connector
+spec:
+  type: ClusterIP
+  ports:
+  - name: health
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+  selector:
+    app: email-connector

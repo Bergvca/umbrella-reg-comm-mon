@@ -14,9 +14,10 @@ from tests.conftest import make_parsed_email
 
 
 def _make_kafka_message(parsed: dict) -> MagicMock:
-    """Wrap a parsed dict as a mock Kafka consumer record."""
+    """Wrap a parsed dict as a mock Kafka consumer record (raw bytes)."""
     msg = MagicMock()
-    msg.value = parsed
+    msg.value = json.dumps(parsed).encode("utf-8")
+    msg.offset = 0
     return msg
 
 

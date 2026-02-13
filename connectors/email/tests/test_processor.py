@@ -19,16 +19,15 @@ def processor(processor_config: EmailProcessorConfig) -> EmailProcessor:
     return EmailProcessor(processor_config)
 
 
-def _make_kafka_message(
+def _make_raw_message_dict(
     *,
     raw_message_id: str = "msg-001",
     channel: str = "email",
     raw_format: str = "eml_ref",
     s3_uri: str = "s3://bucket/raw/email/100.eml",
-) -> MagicMock:
-    """Create a mock Kafka consumer message."""
-    msg = MagicMock()
-    msg.value = {
+) -> dict:
+    """Create a raw message dict."""
+    return {
         "raw_message_id": raw_message_id,
         "channel": channel,
         "raw_format": raw_format,
@@ -39,6 +38,13 @@ def _make_kafka_message(
         },
         "metadata": {"imap_uid": "100"},
     }
+
+
+def _make_kafka_message(**kwargs) -> MagicMock:
+    """Create a mock Kafka consumer message with bytes value."""
+    msg = MagicMock()
+    msg.value = json.dumps(_make_raw_message_dict(**kwargs)).encode("utf-8")
+    msg.offset = 0
     return msg
 
 
@@ -71,7 +77,7 @@ class TestEmailProcessorProcessMessage:
         processor._producer = AsyncMock()
         processor._producer.send_and_wait = AsyncMock()
 
-        raw_message = _make_kafka_message().value
+        raw_message = _make_raw_message_dict()
         await processor._process_message(raw_message)
 
         # S3 download called
@@ -109,7 +115,7 @@ class TestEmailProcessorProcessMessage:
         processor._producer = AsyncMock()
         processor._producer.send_and_wait = AsyncMock()
 
-        await processor._process_message(_make_kafka_message().value)
+        await processor._process_message(_make_raw_message_dict())
 
         output = json.loads(
             processor._producer.send_and_wait.call_args[1]["value"]

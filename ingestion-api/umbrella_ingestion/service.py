@@ -77,7 +77,7 @@ class IngestionService:
             kafka_cfg.source_topic,
             bootstrap_servers=kafka_cfg.bootstrap_servers,
             group_id=kafka_cfg.consumer_group,
-            value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+            auto_offset_reset=kafka_cfg.auto_offset_reset,
             enable_auto_commit=False,
         )
         self._producer = AIOKafkaProducer(
@@ -115,7 +115,14 @@ class IngestionService:
             if self._shutdown_event.is_set():
                 break
 
-            raw_message = msg.value
+            try:
+                raw_message = json.loads(msg.value.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                logger.exception("message_deserialize_failed", offset=msg.offset)
+                self._messages_failed += 1
+                await self._consumer.commit()
+                continue
+
             channel = raw_message.get("channel")
 
             normalizer = self._registry.get(channel)

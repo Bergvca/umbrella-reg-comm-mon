@@ -39,6 +39,10 @@ class KafkaConsumerConfig(BaseSettings):
         default="gzip",
         description="Kafka producer compression type",
     )
+    auto_offset_reset: str = Field(
+        default="earliest",
+        description="Where to start consuming if no committed offset exists",
+    )
 
 
 class S3Config(BaseSettings):
