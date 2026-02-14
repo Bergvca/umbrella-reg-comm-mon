@@ -382,22 +382,22 @@ A custom single-page application backed by an API server.
 
 ## 6. Technology Summary
 
-| Layer | Technology |
-|---|---|
+| Layer | Technology                                       |
+|---|--------------------------------------------------|
 | Connectors | Python / Go microservices, channel-specific SDKs |
-| Ingestion API | Go or Python (FastAPI), OpenAPI spec |
-| Message Bus | Apache Kafka (KRaft mode) |
-| Object Storage | S3 (or MinIO for on-prem) |
-| Transcription | OpenAI Whisper / Azure Speech Services |
-| Translation | Azure Translator / Cloud Translate |
-| NLP | spaCy, custom models, lexicon engine |
-| Search | Elasticsearch 8.x |
-| Application DB | PostgreSQL 16 |
-| Frontend | React + TypeScript |
-| UI Backend | Node.js (Express/Fastify) or Python (FastAPI) |
-| Orchestration | Kubernetes (EKS / AKS / GKE) |
-| CI/CD | GitHub Actions, Helm, ArgoCD |
-| Observability | Prometheus, Grafana, OpenTelemetry |
+| Ingestion API | Go or Python (FastAPI), OpenAPI spec             |
+| Message Bus | Apache Kafka (KRaft mode)                        |
+| Object Storage | S3 (or MinIO for on-prem)                        |
+| Transcription | OpenAI Whisper / Azure Speech Services           |
+| Translation | Azure Translator / Cloud Translate               |
+| NLP | spaCy, custom models, lexicon engine             |
+| Search | Elasticsearch 9.x                                |
+| Application DB | PostgreSQL 16                                    |
+| Frontend | React + TypeScript                               |
+| UI Backend | Python (FastAPI)    |
+| Orchestration | Kubernetes (EKS / AKS / GKE)                     |
+| CI/CD | GitHub Actions, Helm, ArgoCD                     |
+| Observability | Prometheus, Grafana, OpenTelemetry               |
 
 ---
 

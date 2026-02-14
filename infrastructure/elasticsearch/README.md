@@ -314,6 +314,6 @@ kafka-consumer-groups --bootstrap-server kafka:9092 --group logstash-messages --
 
 ## Related Documentation
 
-- [Elasticsearch Setup Plan](../../elasticsearch_setup.md)
+- [Elasticsearch Setup Plan](../../docs/elasticsearch_setup.md)
 - [Kafka Configuration](../kafka/README.md)
 - [K8s Deployment Guide](../../deploy/k8s/README.md)

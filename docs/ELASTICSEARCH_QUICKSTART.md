@@ -132,7 +132,7 @@ kafka-consumer-groups --bootstrap-server kafka:9092 --group logstash-messages --
 
 ## Documentation
 
-- Full setup guide: [`infrastructure/elasticsearch/README.md`](infrastructure/elasticsearch/README.md)
+- Full setup guide: [`infrastructure/elasticsearch/README.md`](../infrastructure/elasticsearch/README.md)
 - Implementation details: [`ELASTICSEARCH_IMPLEMENTATION_SUMMARY.md`](ELASTICSEARCH_IMPLEMENTATION_SUMMARY.md)
 - Original plan: [`elasticsearch_setup.md`](elasticsearch_setup.md)
 

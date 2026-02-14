@@ -40,6 +40,8 @@ build_image() {
 # Parse arguments
 BUILD_EMAIL=false
 BUILD_INGESTION=false
+BUILD_UI_BACKEND=false
+BUILD_UI_FRONTEND=false
 BUILD_ALL=false
 
 if [ $# -eq 0 ]; then
@@ -53,12 +55,18 @@ else
             ingestion)
                 BUILD_INGESTION=true
                 ;;
+            ui-backend)
+                BUILD_UI_BACKEND=true
+                ;;
+            ui-frontend)
+                BUILD_UI_FRONTEND=true
+                ;;
             all)
                 BUILD_ALL=true
                 ;;
             *)
                 echo "Unknown service: $1"
-                echo "Usage: $0 [email|ingestion|all]"
+                echo "Usage: $0 [email|ingestion|ui-backend|ui-frontend|all]"
                 echo "  If no argument provided, builds all images"
                 exit 1
                 ;;
@@ -76,12 +84,20 @@ if [ "$BUILD_ALL" = true ] || [ "$BUILD_INGESTION" = true ]; then
     build_image "umbrella-ingestion" "ingestion-api/Dockerfile"
 fi
 
+if [ "$BUILD_ALL" = true ] || [ "$BUILD_UI_BACKEND" = true ]; then
+    build_image "umbrella-ui-backend" "ui/backend/Dockerfile"
+fi
+
+if [ "$BUILD_ALL" = true ] || [ "$BUILD_UI_FRONTEND" = true ]; then
+    build_image "umbrella-ui-frontend" "ui/frontend/Dockerfile"
+fi
+
 echo "=========================================="
 echo "All builds completed successfully!"
 echo "=========================================="
 echo ""
 echo "Images built:"
-docker images | grep -E "umbrella-(email|ingestion)" | head -10
+docker images | grep -E "umbrella-(email|ingestion|ui-)" | head -20
 
 echo ""
 echo "To use with minikube:"

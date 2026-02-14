@@ -105,3 +105,4 @@ Kafka topics: `raw-messages`, `parsed-messages`, `normalized-messages`, `process
 - **Normalizer registry pattern** — `ingestion-api/umbrella_ingestion/normalizers/` has a `BaseNormalizer` ABC and `NormalizerRegistry` mapping `Channel` → normalizer
 - New connectors: subclass `BaseConnector`, implement `ingest() -> AsyncIterator[RawMessage]`
 - New normalizers: subclass `BaseNormalizer`, register in the `NormalizerRegistry`
+- use UV for a all venv python tasks

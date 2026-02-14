@@ -54,6 +54,8 @@ eval $(minikube docker-env)
 info "Building Docker images..."
 docker build --no-cache -f connectors/email/Dockerfile -t umbrella-email:latest .
 docker build --no-cache -f ingestion-api/Dockerfile -t umbrella-ingestion:latest .
+docker build --no-cache -f ui/backend/Dockerfile -t umbrella-ui-backend:latest .
+docker build --no-cache -f ui/frontend/Dockerfile -t umbrella-ui-frontend:latest .
 
 # 4. Deploy infrastructure (order matters — dependencies first)
 info "Deploying umbrella-streaming (Kafka)..."
@@ -109,6 +111,46 @@ info "Deploying ingestion-service (Stage 3)..."
 kubectl apply -f deploy/k8s/umbrella-ingestion/namespace.yaml
 kubectl apply -f deploy/k8s/umbrella-ingestion/
 kubectl wait --for=condition=ready pod -l app=ingestion-service -n umbrella-ingestion --timeout=120s
+
+info "Deploying umbrella-ui (backend + frontend)..."
+kubectl apply -f deploy/k8s/umbrella-ui/namespace.yaml
+kubectl apply -f deploy/k8s/umbrella-ui/secret.yaml
+kubectl apply -f deploy/k8s/umbrella-ui/backend/
+kubectl apply -f deploy/k8s/umbrella-ui/frontend/
+
+info "Waiting for UI backend to be ready..."
+kubectl rollout status deployment/umbrella-ui-backend -n umbrella-ui --timeout=120s
+
+info "Waiting for UI frontend to be ready..."
+kubectl rollout status deployment/umbrella-ui-frontend -n umbrella-ui --timeout=60s
+
+# Insert test user into PostgreSQL for Stage 6 auth check
+info "Seeding test user for UI authentication check..."
+kubectl delete pod pg-seed-user -n umbrella-storage --ignore-not-found 2>/dev/null || true
+kubectl run pg-seed-user --rm -i --restart=Never \
+  --image=postgres:16-alpine \
+  -n umbrella-storage \
+  --env="PGPASSWORD=changeme" -- \
+  psql -h postgresql.umbrella-storage.svc -U umbrella_admin -d umbrella -c "
+INSERT INTO iam.users (id, username, email, password_hash, is_active)
+VALUES (
+  '00000000-0000-0000-0000-000000000001',
+  'testadmin',
+  'testadmin@umbrella.local',
+  '\$2b\$12\$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LwGqiK7UNvEdv5q.W',
+  true
+)
+ON CONFLICT (id) DO NOTHING;
+INSERT INTO iam.groups (id, name, description)
+VALUES ('00000000-0000-0000-0000-000000000010', 'admins', 'Admin group')
+ON CONFLICT (id) DO NOTHING;
+INSERT INTO iam.user_groups (user_id, group_id)
+VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000010')
+ON CONFLICT DO NOTHING;
+INSERT INTO iam.group_roles (group_id, role_id)
+SELECT '00000000-0000-0000-0000-000000000010', id FROM iam.roles WHERE name = 'admin'
+ON CONFLICT DO NOTHING;
+"
 
 info "All services deployed successfully!"
 echo ""
@@ -212,19 +254,96 @@ else
     warn "✗ No documents found in Elasticsearch"
 fi
 
+# Stage 5: UI backend message search API (deployed in K8s)
+info "Checking UI backend message search API (Stage 5)..."
+UI_RESULT=0
+
+kubectl port-forward -n umbrella-ui svc/umbrella-ui-backend 8001:8000 >/dev/null 2>&1 &
+PF_UI_PID=$!
+sleep 3
+
+# Generate a reviewer JWT using the same secret that's in the K8s secret
+TEST_JWT_SECRET="umbrella-dev-jwt-secret-change-in-production"
+UI_TOKEN=$(uv run --project ui/backend python -c "
+from jose import jwt
+import time
+payload = {
+    'sub': '00000000-0000-0000-0000-000000000001',
+    'roles': ['reviewer'],
+    'type': 'access',
+    'exp': int(time.time()) + 300,
+}
+print(jwt.encode(payload, '$TEST_JWT_SECRET', algorithm='HS256'))
+")
+
+API_RESPONSE=$(curl -s -H "Authorization: Bearer $UI_TOKEN" \
+    "http://localhost:8001/api/v1/messages/search?q=pipeline-test-001")
+UI_RESULT=$(echo "$API_RESPONSE" | jq -r '.total // 0' 2>/dev/null || echo "0")
+
+kill $PF_UI_PID 2>/dev/null || true
+
+if [ "$UI_RESULT" -gt 0 ]; then
+    info "✓ UI API returned $UI_RESULT message(s) for the test email"
+else
+    warn "✗ UI API returned no messages (response: $API_RESPONSE)"
+fi
+
+# Stage 6: UI login + auth flow (validates PostgreSQL + RBAC)
+info "Checking UI login flow (Stage 6)..."
+LOGIN_OK=0
+
+kubectl port-forward -n umbrella-ui svc/umbrella-ui-backend 8001:8000 >/dev/null 2>&1 &
+PF_UI2_PID=$!
+sleep 2
+
+LOGIN_RESPONSE=$(curl -s -X POST http://localhost:8001/api/v1/auth/login \
+    -H "Content-Type: application/json" \
+    -d '{"username":"testadmin","password":"testpass123"}')
+
+ACCESS_TOKEN=$(echo "$LOGIN_RESPONSE" | jq -r '.access_token // empty' 2>/dev/null)
+
+if [ -n "$ACCESS_TOKEN" ] && [ "$ACCESS_TOKEN" != "null" ]; then
+    ME_RESPONSE=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+        http://localhost:8001/api/v1/auth/me)
+    HAS_ADMIN=$(echo "$ME_RESPONSE" | jq -r '[.roles[]? | select(. == "admin")] | length' 2>/dev/null || echo "0")
+
+    if [ "$HAS_ADMIN" -gt 0 ]; then
+        info "✓ Login succeeded — testadmin has admin role"
+        LOGIN_OK=1
+    else
+        warn "✗ Login succeeded but admin role missing (response: $ME_RESPONSE)"
+    fi
+else
+    warn "✗ Login failed (response: $LOGIN_RESPONSE)"
+fi
+
+kill $PF_UI2_PID 2>/dev/null || true
+
 echo ""
 echo "=========================================="
 echo "Pipeline Test Summary"
 echo "=========================================="
-echo "Stage 1 (IMAP Connector):    $([ "$RAW_COUNT" -gt 0 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
-echo "Stage 2 (Email Processor):   $([ "$PARSED_COUNT" -gt 0 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 1 (IMAP Connector):    $([ "$RAW_COUNT" -gt 0 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 2 (Email Processor):   $([ "$PARSED_COUNT" -gt 0 ]     && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "Stage 3 (Ingestion Service): $([ "$NORMALIZED_COUNT" -gt 0 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
-echo "Stage 4 (Logstash → ES):     $([ "$ES_RESULT" -gt 0 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 4 (Logstash → ES):     $([ "$ES_RESULT" -gt 0 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 5 (UI API search):     $([ "$UI_RESULT" -gt 0 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 6 (UI login/auth):     $([ "$LOGIN_OK" -eq 1 ]         && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "=========================================="
 echo ""
 
-if [ "$RAW_COUNT" -gt 0 ] && [ "$PARSED_COUNT" -gt 0 ] && [ "$NORMALIZED_COUNT" -gt 0 ] && [ "$ES_RESULT" -gt 0 ]; then
-    info "✓ PIPELINE TEST PASSED - All 4 stages working!"
+if [ "$RAW_COUNT" -gt 0 ] && [ "$PARSED_COUNT" -gt 0 ] && \
+   [ "$NORMALIZED_COUNT" -gt 0 ] && [ "$ES_RESULT" -gt 0 ] && \
+   [ "$UI_RESULT" -gt 0 ] && [ "$LOGIN_OK" -eq 1 ]; then
+    info "✓ PIPELINE TEST PASSED - All 6 stages working!"
+    echo ""
+    info "To access the UI:"
+    echo "  kubectl port-forward -n umbrella-ui svc/umbrella-ui-frontend 3000:80"
+    echo "  Open http://localhost:3000 — login with testadmin / testpass123"
+    echo ""
+    info "To access the UI API directly:"
+    echo "  kubectl port-forward -n umbrella-ui svc/umbrella-ui-backend 8001:8000"
+    echo "  Open http://localhost:8001/docs for the OpenAPI UI"
     echo ""
     info "To explore the data in Kibana:"
     echo "  kubectl port-forward -n umbrella-storage svc/kibana 5601:5601"
@@ -236,6 +355,7 @@ if [ "$RAW_COUNT" -gt 0 ] && [ "$PARSED_COUNT" -gt 0 ] && [ "$NORMALIZED_COUNT" 
     echo "  kubectl logs -n umbrella-connectors -l app=email-processor -f"
     echo "  kubectl logs -n umbrella-ingestion -l app=ingestion-service -f"
     echo "  kubectl logs -n umbrella-storage -l app=logstash -f"
+    echo "  kubectl logs -n umbrella-ui -l app=umbrella-ui-backend -f"
     exit 0
 else
     error "✗ PIPELINE TEST FAILED - Check logs for errors"
@@ -245,5 +365,6 @@ else
     echo "  kubectl logs -n umbrella-connectors -l app=email-processor --tail=50"
     echo "  kubectl logs -n umbrella-ingestion -l app=ingestion-service --tail=50"
     echo "  kubectl logs -n umbrella-storage -l app=logstash --tail=50"
+    echo "  kubectl logs -n umbrella-ui -l app=umbrella-ui-backend --tail=50"
     exit 1
 fi
