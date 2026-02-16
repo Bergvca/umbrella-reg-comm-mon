@@ -75,6 +75,67 @@ kubectl rollout status statefulset/kafka -n umbrella-streaming --timeout=180s
 info "Deploying umbrella-storage (MinIO + Elasticsearch + Logstash)..."
 kubectl apply -f deploy/k8s/umbrella-storage/namespace.yaml
 
+info "Deploying PostgreSQL..."
+kubectl apply -f deploy/k8s/umbrella-storage/postgresql/
+kubectl rollout status statefulset/postgresql -n umbrella-storage --timeout=180s
+
+# Wait for Flyway migrations to complete
+info "Waiting for PostgreSQL migrations to complete..."
+kubectl wait --for=condition=complete job/postgresql-migrations -n umbrella-storage --timeout=120s
+
+# Create per-schema DB roles (init-roles.sql is in the configmap but nothing executes it)
+info "Creating database roles..."
+PG_POD=$(kubectl get pod -n umbrella-storage -l app=postgresql -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n umbrella-storage "$PG_POD" -- psql -U postgres -d umbrella -c "
+DO \$\$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'iam_rw') THEN
+        CREATE ROLE iam_rw LOGIN PASSWORD 'changeme-iam';
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'policy_rw') THEN
+        CREATE ROLE policy_rw LOGIN PASSWORD 'changeme-policy';
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'alert_rw') THEN
+        CREATE ROLE alert_rw LOGIN PASSWORD 'changeme-alert';
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'review_rw') THEN
+        CREATE ROLE review_rw LOGIN PASSWORD 'changeme-review';
+    END IF;
+
+    -- Grant schema usage and table permissions
+    GRANT USAGE ON SCHEMA iam    TO iam_rw;
+    GRANT USAGE ON SCHEMA policy TO policy_rw;
+    GRANT USAGE ON SCHEMA alert  TO alert_rw;
+    GRANT USAGE ON SCHEMA review TO review_rw;
+
+    -- Cross-schema read grants (per the role permissions table)
+    GRANT USAGE ON SCHEMA iam    TO policy_rw, alert_rw, review_rw;
+    GRANT USAGE ON SCHEMA policy TO alert_rw, review_rw;
+    GRANT USAGE ON SCHEMA alert  TO review_rw;
+
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA iam    TO iam_rw;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA policy TO policy_rw;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA alert  TO alert_rw;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA review TO review_rw;
+
+    -- Cross-schema read-only grants
+    GRANT SELECT ON ALL TABLES IN SCHEMA iam    TO policy_rw, alert_rw, review_rw;
+    GRANT SELECT ON ALL TABLES IN SCHEMA policy TO alert_rw, review_rw;
+    GRANT SELECT ON ALL TABLES IN SCHEMA alert  TO review_rw;
+
+    -- Default privileges for future tables
+    ALTER DEFAULT PRIVILEGES IN SCHEMA iam    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO iam_rw;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA policy GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO policy_rw;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA alert  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO alert_rw;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA review GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO review_rw;
+
+    ALTER DEFAULT PRIVILEGES IN SCHEMA iam    GRANT SELECT ON TABLES TO policy_rw, alert_rw, review_rw;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA policy GRANT SELECT ON TABLES TO alert_rw, review_rw;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA alert  GRANT SELECT ON TABLES TO review_rw;
+END
+\$\$;
+"
+
 info "Deploying MinIO..."
 kubectl apply -f deploy/k8s/umbrella-storage/minio/
 kubectl rollout status deployment/minio -n umbrella-storage --timeout=120s
@@ -124,20 +185,18 @@ kubectl rollout status deployment/umbrella-ui-backend -n umbrella-ui --timeout=1
 info "Waiting for UI frontend to be ready..."
 kubectl rollout status deployment/umbrella-ui-frontend -n umbrella-ui --timeout=60s
 
-# Insert test user into PostgreSQL for Stage 6 auth check
+# Insert test user into PostgreSQL for Stage 6 auth check.
+# Exec directly into the running PostgreSQL pod (avoids DNS + new-pod issues).
 info "Seeding test user for UI authentication check..."
-kubectl delete pod pg-seed-user -n umbrella-storage --ignore-not-found 2>/dev/null || true
-kubectl run pg-seed-user --rm -i --restart=Never \
-  --image=postgres:16-alpine \
-  -n umbrella-storage \
-  --env="PGPASSWORD=changeme" -- \
-  psql -h postgresql.umbrella-storage.svc -U umbrella_admin -d umbrella -c "
+PG_POD=$(kubectl get pod -n umbrella-storage -l app=postgresql -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n umbrella-storage "$PG_POD" -- \
+  psql -U postgres -d umbrella -c "
 INSERT INTO iam.users (id, username, email, password_hash, is_active)
 VALUES (
   '00000000-0000-0000-0000-000000000001',
   'testadmin',
   'testadmin@umbrella.local',
-  '\$2b\$12\$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LwGqiK7UNvEdv5q.W',
+  '\$2b\$12\$23pdUICP8b0RHga0Tcu/gex/khFYnun9snfyYc/maeLeRhIzHp/RK',
   true
 )
 ON CONFLICT (id) DO NOTHING;
@@ -167,13 +226,15 @@ kubectl run smtp-sender --rm -i --image=umbrella-email:latest --image-pull-polic
   python3 -c "
 import smtplib
 from email.message import EmailMessage
+from email.utils import formatdate
 
 msg = EmailMessage()
 msg['From'] = 'alice@example.com'
 msg['To'] = 'testuser@umbrella.local'
 msg['Subject'] = 'Pipeline Test - E2E Validation'
 msg['Message-ID'] = '<pipeline-test-001@example.com>'
-msg.set_content('Test email for pipeline validation. If this appears in Elasticsearch, all 4 stages work.')
+msg['Date'] = formatdate(localtime=False)
+msg.set_content('Test email for pipeline validation. If this appears in Elasticsearch, all 4 stages work. This message contains potential fraud activity for compliance testing.')
 
 with smtplib.SMTP('mailserver.umbrella-connectors.svc', 25) as s:
     s.send_message(msg)
@@ -319,6 +380,128 @@ fi
 
 kill $PF_UI2_PID 2>/dev/null || true
 
+# Stage 7: Seed fraud policy/rule and create alert for the test document
+info "Seeding fraud policy, rule, and alert (Stage 7)..."
+ALERT_OK=0
+
+# Get the ES document ID and index for the test message so the alert links correctly.
+# Use term on message_id.keyword (exact match) to avoid false positives from
+# tokenisation against older documents that share tokens like "test" or "001".
+EXACT_MSG_ID="<pipeline-test-001@example.com>"
+ES_DOC_ID=""
+ES_INDEX=""
+ES_TS=""
+
+kubectl port-forward -n umbrella-storage svc/elasticsearch 9200:9200 >/dev/null 2>&1 &
+PF_ES2_PID=$!
+sleep 3
+
+# Poll up to 60 extra seconds for the specific document to be indexed.
+# Stages 1-4 can pass on stale Kafka offset counts; the exact document may
+# take longer than the initial 45s wait to propagate through Logstash.
+info "Waiting for pipeline-test-001 document to appear in Elasticsearch..."
+for attempt in $(seq 1 12); do
+    ES_DOC=$(curl -s "http://localhost:9200/messages-*/_search" \
+      -H "Content-Type: application/json" \
+      -d "{\"query\":{\"term\":{\"message_id.keyword\":\"${EXACT_MSG_ID}\"}},\"size\":1}")
+    ES_DOC_ID=$(echo "$ES_DOC" | jq -r '.hits.hits[0]._id // empty')
+    ES_INDEX=$(echo "$ES_DOC" | jq -r '.hits.hits[0]._index // empty')
+    ES_TS=$(echo "$ES_DOC" | jq -r '.hits.hits[0]._source["@timestamp"] // empty')
+
+    if [ -n "$ES_DOC_ID" ] && [ -n "$ES_INDEX" ]; then
+        info "✓ Found document after $((attempt * 5))s: id=$ES_DOC_ID index=$ES_INDEX"
+        break
+    fi
+    echo -ne "\r  Not indexed yet, retrying in 5s... (attempt $attempt/12)"
+    sleep 5
+done
+echo ""
+
+kill $PF_ES2_PID 2>/dev/null || true
+
+if [ -z "$ES_DOC_ID" ] || [ -z "$ES_INDEX" ]; then
+    warn "✗ pipeline-test-001 document not found in Elasticsearch after 60s extra wait"
+else
+    PG_POD=$(kubectl get pod -n umbrella-storage -l app=postgresql -o jsonpath='{.items[0].metadata.name}')
+    kubectl exec -n umbrella-storage "$PG_POD" -- \
+      psql -U postgres -d umbrella -c "
+-- Risk model
+INSERT INTO policy.risk_models (id, name, description, is_active, created_by)
+VALUES (
+  'aaaaaaaa-0000-0000-0000-000000000001',
+  'Financial Crime',
+  'Detects potential financial crime indicators in communications',
+  true,
+  '00000000-0000-0000-0000-000000000001'
+) ON CONFLICT (id) DO NOTHING;
+
+-- Policy
+INSERT INTO policy.policies (id, risk_model_id, name, description, is_active, created_by)
+VALUES (
+  'bbbbbbbb-0000-0000-0000-000000000001',
+  'aaaaaaaa-0000-0000-0000-000000000001',
+  'Fraud Detection',
+  'Flags messages containing fraud-related keywords',
+  true,
+  '00000000-0000-0000-0000-000000000001'
+) ON CONFLICT (id) DO NOTHING;
+
+-- Rule
+INSERT INTO policy.rules (id, policy_id, name, description, kql, severity, is_active, created_by)
+VALUES (
+  'cccccccc-0000-0000-0000-000000000001',
+  'bbbbbbbb-0000-0000-0000-000000000001',
+  'Fraud Keyword Match',
+  'Triggers when the word \"fraud\" appears in a message',
+  'body_text:fraud',
+  'high',
+  true,
+  '00000000-0000-0000-0000-000000000001'
+) ON CONFLICT (id) DO NOTHING;
+
+-- Alert linked to the test ES document
+-- ON CONFLICT on id: update es_index/es_document_id so re-runs always point to
+-- the current document (not a stale one from a previous pipeline run).
+INSERT INTO alert.alerts (
+  id, name, rule_id, es_index, es_document_id, es_document_ts, severity, status
+) VALUES (
+  'dddddddd-0000-0000-0000-000000000001',
+  'Fraud Keyword Match — pipeline-test-001',
+  'cccccccc-0000-0000-0000-000000000001',
+  '$ES_INDEX',
+  '$ES_DOC_ID',
+  CASE WHEN '$ES_TS' = '' THEN NULL ELSE '$ES_TS'::timestamptz END,
+  'high',
+  'open'
+) ON CONFLICT (id) DO UPDATE SET
+  es_index       = EXCLUDED.es_index,
+  es_document_id = EXCLUDED.es_document_id,
+  es_document_ts = EXCLUDED.es_document_ts,
+  status         = 'open';
+
+-- Decision statuses (needed for the review UI)
+INSERT INTO review.decision_statuses (id, name, description, is_terminal)
+VALUES
+  ('eeeeeeee-0000-0000-0000-000000000001', 'Escalate',    'Escalate for further review', false),
+  ('eeeeeeee-0000-0000-0000-000000000002', 'No Breach',   'Reviewed — no policy breach', true),
+  ('eeeeeeee-0000-0000-0000-000000000003', 'Breach Found','Confirmed policy breach',     true)
+ON CONFLICT (id) DO NOTHING;
+"
+
+    # Verify the alert was created
+    ALERT_COUNT=$(kubectl exec -n umbrella-storage "$PG_POD" -- \
+      psql -U postgres -d umbrella -tAc \
+      "SELECT COUNT(*) FROM alert.alerts WHERE id = 'dddddddd-0000-0000-0000-000000000001';")
+    ALERT_COUNT="${ALERT_COUNT//[[:space:]]/}"
+
+    if [ "$ALERT_COUNT" -gt 0 ]; then
+        info "✓ Fraud alert created (policy: Fraud Detection, rule: Fraud Keyword Match, severity: high)"
+        ALERT_OK=1
+    else
+        warn "✗ Alert insert failed"
+    fi
+fi
+
 echo ""
 echo "=========================================="
 echo "Pipeline Test Summary"
@@ -329,13 +512,14 @@ echo "Stage 3 (Ingestion Service): $([ "$NORMALIZED_COUNT" -gt 0 ] && echo '[✓
 echo "Stage 4 (Logstash → ES):     $([ "$ES_RESULT" -gt 0 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "Stage 5 (UI API search):     $([ "$UI_RESULT" -gt 0 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "Stage 6 (UI login/auth):     $([ "$LOGIN_OK" -eq 1 ]         && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 7 (Fraud alert):       $([ "$ALERT_OK" -eq 1 ]         && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "=========================================="
 echo ""
 
 if [ "$RAW_COUNT" -gt 0 ] && [ "$PARSED_COUNT" -gt 0 ] && \
    [ "$NORMALIZED_COUNT" -gt 0 ] && [ "$ES_RESULT" -gt 0 ] && \
-   [ "$UI_RESULT" -gt 0 ] && [ "$LOGIN_OK" -eq 1 ]; then
-    info "✓ PIPELINE TEST PASSED - All 6 stages working!"
+   [ "$UI_RESULT" -gt 0 ] && [ "$LOGIN_OK" -eq 1 ] && [ "$ALERT_OK" -eq 1 ]; then
+    info "✓ PIPELINE TEST PASSED - All 7 stages working!"
     echo ""
     info "To access the UI:"
     echo "  kubectl port-forward -n umbrella-ui svc/umbrella-ui-frontend 3000:80"

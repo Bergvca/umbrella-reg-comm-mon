@@ -137,6 +137,29 @@ async def get_queue(
     )
 
 
+@router.get("/queues/{queue_id}/batches", response_model=list[BatchOut])
+async def list_batches(
+    queue_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_review_session)],
+    _user: Annotated[dict, Depends(require_role("reviewer"))],
+):
+    batches = (
+        await session.execute(
+            select(QueueBatch).where(QueueBatch.queue_id == queue_id).order_by(QueueBatch.created_at)
+        )
+    ).scalars().all()
+
+    result = []
+    for batch in batches:
+        item_count = (
+            await session.execute(
+                select(func.count()).select_from(QueueItem).where(QueueItem.batch_id == batch.id)
+            )
+        ).scalar_one()
+        result.append(_batch_out(batch, item_count))
+    return result
+
+
 @router.post(
     "/queues/{queue_id}/batches",
     response_model=BatchOut,
@@ -182,11 +205,11 @@ async def update_batch(
     if isinstance(body, BatchAssign):
         batch.assigned_to = body.assigned_to
         batch.assigned_by = user["id"]
-        batch.assigned_at = datetime.now(tz=timezone.utc)
+        batch.assigned_at = datetime.now(tz=timezone.utc).replace(tzinfo=None)
     else:
         batch.status = body.status
 
-    batch.updated_at = datetime.now(tz=timezone.utc)
+    batch.updated_at = datetime.now(tz=timezone.utc).replace(tzinfo=None)
     await session.commit()
     await session.refresh(batch)
 

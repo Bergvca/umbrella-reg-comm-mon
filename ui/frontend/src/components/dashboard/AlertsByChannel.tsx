@@ -38,7 +38,7 @@ export function AlertsByChannel({ data }: Props) {
             />
             <Tooltip />
             <Bar
-              dataKey="count"
+              dataKey="doc_count"
               fill="oklch(0.55 0.10 250)"
               radius={[0, 4, 4, 0]}
             />

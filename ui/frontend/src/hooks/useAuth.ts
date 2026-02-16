@@ -1,11 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router";
+import { useCallback } from "react";
 import { login, getMe } from "@/api/auth";
 import { useAuthStore } from "@/stores/auth";
 import type { LoginRequest } from "@/lib/types";
 
 export function useLogin() {
-  const { setTokens, setUser } = useAuthStore();
+  const setTokens = useAuthStore((s) => s.setTokens);
+  const setUser = useAuthStore((s) => s.setUser);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
@@ -13,7 +15,6 @@ export function useLogin() {
     mutationFn: (credentials: LoginRequest) => login(credentials),
     onSuccess: async (data) => {
       setTokens(data.access_token, data.refresh_token);
-      // Fetch user profile immediately after login
       const user = await getMe();
       setUser(user);
       queryClient.setQueryData(["auth", "me"], user);
@@ -23,28 +24,24 @@ export function useLogin() {
 }
 
 export function useCurrentUser() {
-  const { isAuthenticated, setUser } = useAuthStore();
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
   return useQuery({
     queryKey: ["auth", "me"],
-    queryFn: async () => {
-      const user = await getMe();
-      setUser(user);
-      return user;
-    },
+    queryFn: getMe,
     enabled: isAuthenticated,
     staleTime: 5 * 60 * 1000, // 5 minutes
   });
 }
 
 export function useLogout() {
-  const { logout } = useAuthStore();
+  const logout = useAuthStore((s) => s.logout);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  return () => {
+  return useCallback(() => {
     logout();
     queryClient.clear();
     void navigate("/login");
-  };
+  }, [logout, navigate, queryClient]);
 }

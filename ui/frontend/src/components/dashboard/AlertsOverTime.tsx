@@ -17,7 +17,7 @@ interface Props {
 export function AlertsOverTime({ data }: Props) {
   const formatted = data.map((d) => ({
     ...d,
-    date: new Date(d.date).toLocaleDateString(undefined, {
+    date: new Date(d.key_as_string).toLocaleDateString(undefined, {
       month: "short",
       day: "numeric",
     }),
@@ -37,7 +37,7 @@ export function AlertsOverTime({ data }: Props) {
             <Tooltip />
             <Area
               type="monotone"
-              dataKey="count"
+              dataKey="doc_count"
               stroke="oklch(0.55 0.10 250)"
               fill="oklch(0.55 0.10 250 / 0.2)"
             />

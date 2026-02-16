@@ -41,7 +41,7 @@ export function AlertsBySeverity({ data }: Props) {
             <XAxis dataKey="key" className="text-xs capitalize" />
             <YAxis className="text-xs" />
             <Tooltip />
-            <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+            <Bar dataKey="doc_count" radius={[4, 4, 0, 0]}>
               {sorted.map((entry) => (
                 <Cell
                   key={entry.key}

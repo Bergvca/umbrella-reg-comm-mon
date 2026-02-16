@@ -36,7 +36,7 @@ export function StatCard({
         <div>
           <p className="text-sm text-muted-foreground">{title}</p>
           <p className={cn("text-2xl font-bold", VARIANT_STYLES[variant])}>
-            {value.toLocaleString()}
+            {(value ?? 0).toLocaleString()}
           </p>
         </div>
       </CardContent>

@@ -111,6 +111,59 @@ async def test_list_queues(app, client, settings):
 
 
 @pytest.mark.asyncio
+async def test_list_batches(app, client, settings):
+    queue_id = uuid.uuid4()
+    batch1 = _make_batch(queue_id=queue_id)
+    batch2 = _make_batch(queue_id=queue_id, status="in_progress")
+
+    session = AsyncMock()
+    call_count = [0]
+
+    async def _execute(stmt, *a, **kw):
+        r = MagicMock()
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # list_batches: select all batches for queue
+            r.scalars.return_value.all.return_value = [batch1, batch2]
+        else:
+            # item count per batch (called once per batch)
+            r.scalar_one.return_value = 0
+        return r
+
+    session.execute = _execute
+    override_review_session(app, session)
+
+    headers = make_reviewer_headers(settings)
+    resp = await client.get(f"/api/v1/queues/{queue_id}/batches", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 2
+    assert data[0]["queue_id"] == str(queue_id)
+    assert data[1]["status"] == "in_progress"
+    assert data[0]["item_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_batches_empty(app, client, settings):
+    queue_id = uuid.uuid4()
+
+    session = AsyncMock()
+
+    async def _execute(stmt, *a, **kw):
+        r = MagicMock()
+        r.scalars.return_value.all.return_value = []
+        return r
+
+    session.execute = _execute
+    override_review_session(app, session)
+
+    headers = make_reviewer_headers(settings)
+    resp = await client.get(f"/api/v1/queues/{queue_id}/batches", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+@pytest.mark.asyncio
 async def test_create_batch(app, client, settings):
     queue_id = uuid.uuid4()
     queue = _make_queue(queue_id=queue_id)

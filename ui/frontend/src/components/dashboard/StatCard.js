@@ -8,5 +8,5 @@ const VARIANT_STYLES = {
     medium: "text-severity-medium",
 };
 export function StatCard({ title, value, icon: Icon, variant = "default", }) {
-    return (_jsx(Card, { children: _jsxs(CardContent, { className: "flex items-center gap-4 p-4", children: [_jsx("div", { className: cn("flex h-10 w-10 items-center justify-center rounded-lg bg-muted", VARIANT_STYLES[variant]), children: _jsx(Icon, { className: "h-5 w-5" }) }), _jsxs("div", { children: [_jsx("p", { className: "text-sm text-muted-foreground", children: title }), _jsx("p", { className: cn("text-2xl font-bold", VARIANT_STYLES[variant]), children: value.toLocaleString() })] })] }) }));
+    return (_jsx(Card, { children: _jsxs(CardContent, { className: "flex items-center gap-4 p-4", children: [_jsx("div", { className: cn("flex h-10 w-10 items-center justify-center rounded-lg bg-muted", VARIANT_STYLES[variant]), children: _jsx(Icon, { className: "h-5 w-5" }) }), _jsxs("div", { children: [_jsx("p", { className: "text-sm text-muted-foreground", children: title }), _jsx("p", { className: cn("text-2xl font-bold", VARIANT_STYLES[variant]), children: (value ?? 0).toLocaleString() })] })] }) }));
 }

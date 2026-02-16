@@ -29,8 +29,10 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/audit", label: "Audit Log", icon: FileText, minRole: "supervisor" },
 ];
 
+const EMPTY_ROLES: string[] = [];
+
 export function Sidebar() {
-  const roles = useAuthStore((s) => s.user?.roles ?? []);
+  const roles = useAuthStore((s) => s.user?.roles ?? EMPTY_ROLES);
 
   const visibleItems = NAV_ITEMS.filter((item) =>
     hasRole(roles, item.minRole),

@@ -1,0 +1,8 @@
+import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { AlertSeverityBadge } from "./AlertSeverityBadge";
+import { AlertStatusBadge } from "./AlertStatusBadge";
+import { formatDateTime } from "@/lib/utils";
+export function AlertMetadataCard({ alert }) {
+    return (_jsxs(Card, { children: [_jsx(CardHeader, { className: "pb-2", children: _jsxs("div", { className: "flex items-start justify-between gap-4", children: [_jsx(CardTitle, { className: "text-lg", children: alert.name }), _jsx(AlertSeverityBadge, { severity: alert.severity })] }) }), _jsx(CardContent, { children: _jsxs("dl", { className: "grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-3", children: [_jsxs("div", { children: [_jsx("dt", { className: "text-muted-foreground", children: "Status" }), _jsx("dd", { className: "mt-0.5", children: _jsx(AlertStatusBadge, { status: alert.status }) })] }), _jsxs("div", { children: [_jsx("dt", { className: "text-muted-foreground", children: "Rule" }), _jsx("dd", { className: "mt-0.5 font-medium", children: alert.rule_name ?? "—" })] }), _jsxs("div", { children: [_jsx("dt", { className: "text-muted-foreground", children: "Policy" }), _jsx("dd", { className: "mt-0.5 font-medium", children: alert.policy_name ?? "—" })] }), _jsxs("div", { children: [_jsx("dt", { className: "text-muted-foreground", children: "Created" }), _jsx("dd", { className: "mt-0.5", children: formatDateTime(alert.created_at) })] }), _jsxs("div", { children: [_jsx("dt", { className: "text-muted-foreground", children: "Message Timestamp" }), _jsx("dd", { className: "mt-0.5", children: alert.es_document_ts ? formatDateTime(alert.es_document_ts) : "—" })] })] }) })] }));
+}

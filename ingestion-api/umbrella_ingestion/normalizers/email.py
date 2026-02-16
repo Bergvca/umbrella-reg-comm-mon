@@ -151,6 +151,16 @@ class EmailNormalizer(BaseNormalizer):
 
     @staticmethod
     def _parse_timestamp(date_str: str) -> datetime:
-        """Parse RFC 2822 date string to UTC datetime."""
-        dt = email.utils.parsedate_to_datetime(date_str)
-        return dt.astimezone(timezone.utc)
+        """Parse RFC 2822 date string to UTC datetime.
+
+        Falls back to the current UTC time if the Date header is absent or
+        malformed — some SMTP relay configs omit it for programmatically
+        constructed messages.
+        """
+        if date_str:
+            try:
+                dt = email.utils.parsedate_to_datetime(date_str)
+                return dt.astimezone(timezone.utc)
+            except (ValueError, TypeError):
+                logger.warning("email_date_parse_failed", date_str=date_str)
+        return datetime.now(timezone.utc)

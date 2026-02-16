@@ -57,12 +57,12 @@ export interface AlertWithMessage extends AlertOut {
 
 export interface BucketCount {
   key: string;
-  count: number;
+  doc_count: number;
 }
 
 export interface TimeSeriesPoint {
-  date: string;
-  count: number;
+  key_as_string: string;
+  doc_count: number;
 }
 
 export interface AlertStats {
@@ -70,7 +70,6 @@ export interface AlertStats {
   by_channel: BucketCount[];
   by_status: BucketCount[];
   over_time: TimeSeriesPoint[];
-  total: number;
 }
 
 // ── Messages (ES) ─────────────────────────────────────
@@ -141,6 +140,8 @@ export interface QueueOut {
   id: string;
   name: string;
   description?: string;
+  channel?: string;
+  is_active: boolean;
   policy_id: string;
   created_by?: string;
   created_at: string;
@@ -171,6 +172,7 @@ export interface UserOut {
   id: string;
   username: string;
   email: string;
+  full_name?: string;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -228,9 +230,74 @@ export interface RuleOut {
 export interface AuditLogEntry {
   id: string;
   decision_id: string;
-  actor_id: string;
+  actor_id: string | null;
   action: string;
-  old_values?: Record<string, unknown>;
-  new_values?: Record<string, unknown>;
+  object_type?: string;
+  object_id?: string;
+  old_values: Record<string, unknown> | null;
+  new_values: Record<string, unknown> | null;
+  occurred_at: string;
+  ip_address: string | null;
+  user_agent: string | null;
+}
+
+// ── Queue Items ───────────────────────────────────────
+
+export interface QueueItemOut {
+  id: string;
+  batch_id: string;
+  alert_id: string;
+  position: number;
   created_at: string;
+}
+
+// ── Message Search ─────────────────────────────────────
+
+export interface ESMessageHit {
+  message: ESMessage;
+  index: string;
+  score: number | null;
+  highlights: Record<string, string[]>;
+}
+
+export interface MessageSearchResponse {
+  hits: ESMessageHit[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+// ── Policy Detail ──────────────────────────────────────
+
+export interface PolicyDetail extends PolicyOut {
+  risk_model_name: string;
+  rule_count: number;
+  group_count: number;
+}
+
+export interface RiskModelDetail extends RiskModelOut {
+  policy_count: number;
+}
+
+export interface GroupPolicyOut {
+  group_id: string;
+  group_name?: string;
+  policy_id: string;
+  assigned_by: string | null;
+  assigned_at: string;
+}
+
+// ── Group Detail ───────────────────────────────────────
+
+export interface GroupDetail extends GroupOut {
+  roles: RoleOut[];
+  member_count: number;
+}
+
+export type QueueBatch = BatchOut;
+
+// ── User with Roles ────────────────────────────────────
+
+export interface UserWithRoles extends UserOut {
+  roles: string[];
 }

@@ -8,27 +8,26 @@ import { describe, it, expect, vi } from "vitest";
 vi.mock("@/hooks/useAlerts", () => ({
   useAlertStats: () => ({
     data: {
-      total: 42,
       by_severity: [
-        { key: "critical", count: 5 },
-        { key: "high", count: 12 },
-        { key: "medium", count: 15 },
-        { key: "low", count: 10 },
+        { key: "critical", doc_count: 5 },
+        { key: "high", doc_count: 12 },
+        { key: "medium", doc_count: 15 },
+        { key: "low", doc_count: 10 },
       ],
       by_channel: [
-        { key: "email", count: 20 },
-        { key: "teams_chat", count: 12 },
-        { key: "bloomberg_chat", count: 10 },
+        { key: "email", doc_count: 20 },
+        { key: "teams_chat", doc_count: 12 },
+        { key: "bloomberg_chat", doc_count: 10 },
       ],
       by_status: [
-        { key: "open", count: 30 },
-        { key: "in_review", count: 7 },
-        { key: "closed", count: 5 },
+        { key: "open", doc_count: 30 },
+        { key: "in_review", doc_count: 7 },
+        { key: "closed", doc_count: 5 },
       ],
       over_time: [
-        { date: "2026-02-10", count: 8 },
-        { date: "2026-02-11", count: 12 },
-        { date: "2026-02-12", count: 10 },
+        { key_as_string: "2026-02-10", doc_count: 8 },
+        { key_as_string: "2026-02-11", doc_count: 12 },
+        { key_as_string: "2026-02-12", doc_count: 10 },
       ],
     },
     isLoading: false,

@@ -3,6 +3,15 @@ import { useAuthStore } from "@/stores/auth";
 import { AppShell } from "@/components/layout/AppShell";
 import { LoginPage } from "@/pages/LoginPage";
 import { DashboardPage } from "@/pages/DashboardPage";
+import { AlertsPage } from "@/pages/AlertsPage";
+import { AlertDetailPage } from "@/pages/AlertDetailPage";
+import { QueuesPage } from "@/pages/QueuesPage";
+import { QueueDetailPage } from "@/pages/QueueDetailPage";
+import { MessagesPage } from "@/pages/MessagesPage";
+import { MessageDetailPage } from "@/pages/MessageDetailPage";
+import { PoliciesPage } from "@/pages/PoliciesPage";
+import { AdminPage } from "@/pages/AdminPage";
+import { AuditPage } from "@/pages/AuditPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 
 /** Redirects to /login if not authenticated */
@@ -19,15 +28,6 @@ function GuestOnly() {
   return <Outlet />;
 }
 
-/** Temporary placeholder for routes not yet implemented */
-function ComingSoon({ label }: { label: string }) {
-  return (
-    <div className="flex items-center justify-center h-full">
-      <p className="text-muted-foreground text-lg">{label} — coming in Phase 5</p>
-    </div>
-  );
-}
-
 export function App() {
   return (
     <Routes>
@@ -41,14 +41,19 @@ export function App() {
         <Route element={<AppShell />}>
           <Route index element={<DashboardPage />} />
 
-          {/* Placeholder routes for Phase 5+ pages */}
-          <Route path="/alerts" element={<ComingSoon label="Alerts" />} />
-          <Route path="/alerts/:id" element={<ComingSoon label="Alert Detail" />} />
-          <Route path="/messages" element={<ComingSoon label="Messages" />} />
-          <Route path="/queues" element={<ComingSoon label="Queues" />} />
-          <Route path="/policies" element={<ComingSoon label="Policies" />} />
-          <Route path="/admin" element={<ComingSoon label="Admin" />} />
-          <Route path="/audit" element={<ComingSoon label="Audit Log" />} />
+          {/* Phase 5 routes */}
+          <Route path="/alerts" element={<AlertsPage />} />
+          <Route path="/alerts/:id" element={<AlertDetailPage />} />
+          <Route path="/queues" element={<QueuesPage />} />
+          <Route path="/queues/:id" element={<QueueDetailPage />} />
+
+          {/* Phase 6 routes */}
+          <Route path="/messages" element={<MessagesPage />} />
+          <Route path="/messages/:index/:docId" element={<MessageDetailPage />} />
+          <Route path="/policies" element={<PoliciesPage />} />
+
+          <Route path="/admin" element={<AdminPage />} />
+          <Route path="/audit" element={<AuditPage />} />
         </Route>
       </Route>
 

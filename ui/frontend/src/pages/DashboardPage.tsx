@@ -34,7 +34,9 @@ export function DashboardPage() {
   }
 
   const severityCount = (level: string) =>
-    stats.by_severity.find((b) => b.key === level)?.count ?? 0;
+    stats.by_severity.find((b) => b.key === level)?.doc_count ?? 0;
+
+  const total = stats.by_severity.reduce((sum, b) => sum + b.doc_count, 0);
 
   return (
     <div className="space-y-6">
@@ -44,7 +46,7 @@ export function DashboardPage() {
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
           title="Total Alerts"
-          value={stats.total}
+          value={total}
           icon={AlertTriangle}
         />
         <StatCard
