@@ -56,18 +56,18 @@ spec:
             httpGet:
               path: /_cluster/health?local=true
               port: 9200
-            initialDelaySeconds: 30
+            initialDelaySeconds: 60
             periodSeconds: 10
             timeoutSeconds: 5
-            failureThreshold: 3
+            failureThreshold: 6
           livenessProbe:
             httpGet:
               path: /_cluster/health?local=true
               port: 9200
-            initialDelaySeconds: 60
+            initialDelaySeconds: 120
             periodSeconds: 10
             timeoutSeconds: 5
-            failureThreshold: 3
+            failureThreshold: 6
       volumes:
         - name: config
           configMap:

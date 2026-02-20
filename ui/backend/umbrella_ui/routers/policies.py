@@ -6,6 +6,7 @@ from typing import Annotated
 from uuid import UUID
 
 import structlog
+from elasticsearch import AsyncElasticsearch
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
@@ -14,7 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from umbrella_ui.auth.rbac import require_role
 from umbrella_ui.db.models.iam import Group
 from umbrella_ui.db.models.policy import GroupPolicy, Policy, RiskModel, Rule
-from umbrella_ui.deps import get_policy_session
+from umbrella_ui.deps import get_es, get_policy_session
+from umbrella_ui.es import percolator as perc
 from umbrella_ui.schemas.common import PaginatedResponse
 from umbrella_ui.schemas.policy import (
     AssignGroupPolicy,
@@ -189,9 +191,11 @@ async def create_rule(
     body: RuleCreate,
     session: Annotated[AsyncSession, Depends(get_policy_session)],
     current_user: Annotated[dict, Depends(require_role("admin"))],
+    es: Annotated[AsyncElasticsearch, Depends(get_es)],
 ):
     policy_result = await session.execute(select(Policy).where(Policy.id == policy_id))
-    if policy_result.scalar_one_or_none() is None:
+    policy = policy_result.scalar_one_or_none()
+    if policy is None:
         raise HTTPException(status_code=404, detail="Policy not found")
 
     rule = Rule(
@@ -205,6 +209,21 @@ async def create_rule(
     session.add(rule)
     await session.commit()
     await session.refresh(rule)
+
+    # Sync to percolator index (fail-open)
+    if rule.is_active and policy.is_active:
+        rm_result = await session.execute(
+            select(RiskModel).where(RiskModel.id == policy.risk_model_id)
+        )
+        rm = rm_result.scalar_one_or_none()
+        if rm:
+            try:
+                await perc.upsert_rule(
+                    es, rule.id, rule.name, policy.id, rm.id, rule.kql, rule.severity
+                )
+            except Exception:
+                logger.exception("percolator_upsert_failed", rule_id=str(rule.id))
+
     return RuleOut.model_validate(rule, from_attributes=True)
 
 
@@ -229,6 +248,7 @@ async def update_rule(
     body: RuleUpdate,
     session: Annotated[AsyncSession, Depends(get_policy_session)],
     _user: Annotated[dict, Depends(require_role("admin"))],
+    es: Annotated[AsyncElasticsearch, Depends(get_es)],
 ):
     result = await session.execute(select(Rule).where(Rule.id == rule_id))
     rule = result.scalar_one_or_none()
@@ -248,6 +268,27 @@ async def update_rule(
 
     await session.commit()
     await session.refresh(rule)
+
+    # Sync to percolator index (fail-open)
+    try:
+        policy_result = await session.execute(
+            select(Policy).where(Policy.id == rule.policy_id)
+        )
+        policy = policy_result.scalar_one_or_none()
+        if policy:
+            rm_result = await session.execute(
+                select(RiskModel).where(RiskModel.id == policy.risk_model_id)
+            )
+            rm = rm_result.scalar_one_or_none()
+            if rule.is_active and policy.is_active and rm:
+                await perc.upsert_rule(
+                    es, rule.id, rule.name, policy.id, rm.id, rule.kql, rule.severity
+                )
+            else:
+                await perc.delete_rule(es, rule.id)
+    except Exception:
+        logger.exception("percolator_sync_failed", rule_id=str(rule.id))
+
     return RuleOut.model_validate(rule, from_attributes=True)
 
 
@@ -256,6 +297,7 @@ async def delete_rule(
     rule_id: UUID,
     session: Annotated[AsyncSession, Depends(get_policy_session)],
     _user: Annotated[dict, Depends(require_role("admin"))],
+    es: Annotated[AsyncElasticsearch, Depends(get_es)],
 ):
     result = await session.execute(select(Rule).where(Rule.id == rule_id))
     rule = result.scalar_one_or_none()
@@ -264,6 +306,12 @@ async def delete_rule(
 
     rule.is_active = False
     await session.commit()
+
+    # Remove from percolator index (fail-open)
+    try:
+        await perc.delete_rule(es, rule_id)
+    except Exception:
+        logger.exception("percolator_delete_failed", rule_id=str(rule_id))
 
 
 # --- Group-policy assignment endpoints ---

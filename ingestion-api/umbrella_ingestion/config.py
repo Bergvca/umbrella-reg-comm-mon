@@ -62,6 +62,52 @@ class S3Config(BaseSettings):
     )
 
 
+class EntityResolverConfig(BaseSettings):
+    """Configuration for the entity resolver."""
+
+    model_config = {"env_prefix": "ENTITY_DB_"}
+
+    dsn: str | None = Field(
+        default=None,
+        description="PostgreSQL DSN for entity schema (e.g. postgresql://entity_rw:pw@host/db)",
+    )
+    cache_refresh_seconds: int = Field(
+        default=60,
+        description="How often to reload the entity cache from Postgres",
+    )
+
+
+class ElasticsearchConfig(BaseSettings):
+    """Elasticsearch connection settings for the ingestion service."""
+
+    model_config = {"env_prefix": "ES_"}
+
+    url: str = Field(
+        default="http://localhost:9200",
+        description="Elasticsearch URL",
+    )
+    percolator_index: str = Field(
+        default="umbrella-alert-rules",
+        description="Percolator index name for alert rules",
+    )
+    request_timeout: int = Field(
+        default=10,
+        description="ES request timeout in seconds",
+    )
+
+
+class AlertDBConfig(BaseSettings):
+    """PostgreSQL connection settings for writing alerts."""
+
+    model_config = {"env_prefix": "ALERT_DB_"}
+
+    dsn: str | None = Field(
+        default=None,
+        description="PostgreSQL DSN for alert schema (e.g. postgresql://alert_rw:pw@host/db). "
+                    "If None, percolation is disabled.",
+    )
+
+
 class IngestionConfig(BaseSettings):
     """Top-level ingestion service configuration."""
 
@@ -81,3 +127,6 @@ class IngestionConfig(BaseSettings):
     )
     kafka: KafkaConsumerConfig = Field(default_factory=KafkaConsumerConfig)
     s3: S3Config = Field(default_factory=S3Config)
+    entity: EntityResolverConfig = Field(default_factory=EntityResolverConfig)
+    es: ElasticsearchConfig = Field(default_factory=ElasticsearchConfig)
+    alert_db: AlertDBConfig = Field(default_factory=AlertDBConfig)

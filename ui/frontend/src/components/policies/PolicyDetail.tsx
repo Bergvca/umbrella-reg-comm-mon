@@ -3,7 +3,6 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Separator } from "@/components/ui/separator";
 import { RuleTable } from "./RuleTable";
 import { GroupPolicyManager } from "./GroupPolicyManager";
 import { PolicyForm } from "./PolicyForm";
@@ -19,7 +18,7 @@ export function PolicyDetail({ policy, canEdit }: PolicyDetailProps) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between">
+      <div className="flex items-start justify-between pb-3 border-b">
         <div>
           <h3 className="font-semibold text-lg">{policy.name}</h3>
           {policy.description && <p className="text-sm text-muted-foreground mt-1">{policy.description}</p>}
@@ -31,8 +30,6 @@ export function PolicyDetail({ policy, canEdit }: PolicyDetailProps) {
           <Button size="sm" variant="outline" onClick={() => setShowEdit(true)}>Edit Policy</Button>
         )}
       </div>
-
-      <Separator />
 
       <Accordion type="multiple" defaultValue={["rules", "groups"]}>
         <AccordionItem value="rules">

@@ -1,10 +1,10 @@
 import { useParams, Link, useSearchParams } from "react-router";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Card, CardContent } from "@/components/ui/card";
-import { BatchItemList } from "@/components/queues/BatchItemList";
+import { Button } from "@/components/ui/button";
+import { AlertTable } from "@/components/alerts/AlertTable";
 import { BatchTable } from "@/components/queues/BatchTable";
-import { CreateBatchDialog } from "@/components/queues/CreateBatchDialog";
-import { useQueue, useQueueBatches } from "@/hooks/useQueues";
+import { useQueue, useQueueBatches, useGenerateBatches, useBatchAlerts } from "@/hooks/useQueues";
 import { useAuthStore } from "@/stores/auth";
 import { hasRole } from "@/lib/utils";
 
@@ -19,6 +19,8 @@ export function QueueDetailPage() {
 
   const { data: queue, isLoading, isError } = useQueue(queueId);
   const { data: batches, isLoading: loadingBatches } = useQueueBatches(queueId);
+  const generateMutation = useGenerateBatches(queueId);
+  const { data: batchAlerts, isLoading: loadingAlerts } = useBatchAlerts(queueId, batchId);
 
   if (isLoading) {
     return (
@@ -71,8 +73,21 @@ export function QueueDetailPage() {
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <h2 className="text-base font-semibold">Batches</h2>
-          {canManage && <CreateBatchDialog queueId={queueId} />}
+          {canManage && (
+            <Button
+              size="sm"
+              onClick={() => generateMutation.mutate()}
+              disabled={generateMutation.isPending}
+            >
+              {generateMutation.isPending ? "Generating..." : "Generate Batches"}
+            </Button>
+          )}
         </div>
+        {generateMutation.isError && (
+          <p className="text-sm text-destructive">
+            {(generateMutation.error as Error)?.message ?? "Failed to generate batches"}
+          </p>
+        )}
         {loadingBatches ? (
           <div className="space-y-2">
             <Skeleton className="h-16 w-full" />
@@ -89,8 +104,15 @@ export function QueueDetailPage() {
 
       {batchId && (
         <div>
-          <h2 className="text-base font-semibold mb-3">Batch Items</h2>
-          <BatchItemList queueId={queueId} batchId={batchId} />
+          <h2 className="text-base font-semibold mb-3">Batch Alerts</h2>
+          <AlertTable
+            data={batchAlerts}
+            total={batchAlerts?.length ?? 0}
+            offset={0}
+            limit={50}
+            onPageChange={() => {}}
+            isLoading={loadingAlerts}
+          />
         </div>
       )}
     </div>

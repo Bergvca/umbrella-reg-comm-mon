@@ -11,6 +11,7 @@ import pytest
 from tests.conftest import (
     make_admin_headers,
     make_reviewer_headers,
+    override_es,
     override_policy_session,
 )
 from umbrella_ui.db.models.policy import GroupPolicy, Policy, RiskModel, Rule
@@ -333,6 +334,7 @@ async def test_create_rule(app, client, settings):
     session.refresh = _refresh
     session.execute = _execute
     override_policy_session(app, session)
+    override_es(app, AsyncMock())
 
     resp = await client.post(
         f"/api/v1/policies/{policy.id}/rules",
@@ -345,6 +347,7 @@ async def test_create_rule(app, client, settings):
 @pytest.mark.asyncio
 async def test_create_rule_invalid_severity(app, client, settings):
     override_policy_session(app, AsyncMock())
+    override_es(app, AsyncMock())
 
     resp = await client.post(
         f"/api/v1/policies/{uuid.uuid4()}/rules",
@@ -365,6 +368,7 @@ async def test_create_rule_policy_not_found(app, client, settings):
 
     session.execute = _execute
     override_policy_session(app, session)
+    override_es(app, AsyncMock())
 
     resp = await client.post(
         f"/api/v1/policies/{uuid.uuid4()}/rules",
@@ -406,6 +410,7 @@ async def test_update_rule(app, client, settings):
 
     session.execute = _execute
     override_policy_session(app, session)
+    override_es(app, AsyncMock())
 
     resp = await client.patch(
         f"/api/v1/rules/{rule.id}",
@@ -429,6 +434,7 @@ async def test_delete_rule_soft(app, client, settings):
 
     session.execute = _execute
     override_policy_session(app, session)
+    override_es(app, AsyncMock())
 
     resp = await client.delete(
         f"/api/v1/rules/{rule.id}",

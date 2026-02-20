@@ -1,5 +1,5 @@
 import { apiFetch } from "./client";
-import type { QueueOut, QueueDetail, BatchOut, PaginatedResponse, QueueItemOut } from "@/lib/types";
+import type { QueueOut, QueueDetail, BatchOut, PaginatedResponse, QueueItemOut, AlertOut } from "@/lib/types";
 
 export async function getQueues(
   params: { offset?: number; limit?: number } = {},
@@ -35,6 +35,14 @@ export async function createQueue(body: { name: string; description?: string; po
 
 export async function createBatch(queueId: string, body: { name?: string }): Promise<BatchOut> {
   return apiFetch(`/queues/${queueId}/batches`, { method: "POST", body: JSON.stringify(body) });
+}
+
+export async function generateBatches(queueId: string): Promise<BatchOut[]> {
+  return apiFetch(`/queues/${queueId}/generate-batches`, { method: "POST" });
+}
+
+export async function getBatchAlerts(queueId: string, batchId: string): Promise<AlertOut[]> {
+  return apiFetch(`/queues/${queueId}/batches/${batchId}/alerts`);
 }
 
 export async function updateBatch(queueId: string, batchId: string, body: { assigned_to?: string; status?: string }): Promise<BatchOut> {

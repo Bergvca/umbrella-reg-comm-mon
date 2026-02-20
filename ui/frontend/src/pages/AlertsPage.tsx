@@ -2,6 +2,7 @@ import { useSearchParams } from "react-router";
 import { AlertFilters } from "@/components/alerts/AlertFilters";
 import { AlertTable } from "@/components/alerts/AlertTable";
 import { ExportButton } from "@/components/export/ExportButton";
+import { GenerateAlertsDialog } from "@/components/alerts/GenerateAlertsDialog";
 import { useAlerts } from "@/hooks/useAlerts";
 import { useAuthStore } from "@/stores/auth";
 import { hasRole } from "@/lib/utils";
@@ -64,12 +65,15 @@ export function AlertsPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">Alerts</h1>
         {isSupervisor && (
-          <ExportButton
-            type="alerts"
-            params={Object.fromEntries(
-              Object.entries({ severity, status }).filter(([, v]) => v != null) as [string, string][]
-            )}
-          />
+          <div className="flex items-center gap-2">
+            <GenerateAlertsDialog />
+            <ExportButton
+              type="alerts"
+              params={Object.fromEntries(
+                Object.entries({ severity, status }).filter(([, v]) => v != null) as [string, string][]
+              )}
+            />
+          </div>
         )}
       </div>
       <AlertFilters filters={filters} onChange={handleFiltersChange} />

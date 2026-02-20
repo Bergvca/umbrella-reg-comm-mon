@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     review_database_url: str = Field(
         description="Async SQLAlchemy URL for the review_rw role",
     )
+    entity_database_url: str = Field(
+        description="Async SQLAlchemy URL for the entity_rw role",
+    )
 
     # --- JWT ----------------------------------------------------------------
     jwt_secret: str = Field(

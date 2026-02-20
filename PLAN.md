@@ -31,245 +31,283 @@ The system follows a **microservices architecture** deployed on **Kubernetes**, 
 
 ---
 
-## 2. Architecture Diagram
+## 2. Architecture & Data Flow
+
+### Three-Stage Pipeline Pattern
+
+All communication channels follow the same **three-stage pipeline**. This pattern has been fully implemented for **Email** and must be replicated for every additional channel.
+
+```
+Channel (IMAP, Graph API, SAPI, ...)
+    │
+    ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STAGE 1 — CONNECTOR                                                        │
+│  Poll/stream the external system. Store large payloads in S3 using the      │
+│  claim-check pattern. Publish RawMessage to Kafka `raw-messages`.           │
+│                                                                              │
+│  Implemented via BaseConnector framework (Kafka producer, S3, health,       │
+│  dead-letter handler, retry logic, asyncio.TaskGroup).                      │
+│  New connectors: subclass BaseConnector, implement ingest() async generator.│
+└──────────┬───────────────────────────────────────────────────────────────────┘
+           │  RawMessage → S3 (payload) + Kafka `raw-messages` (pointer)
+           ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STAGE 2 — PROCESSOR                                                        │
+│  Consume from `raw-messages`. Download payload from S3. Parse the           │
+│  channel-specific format into structured data. Publish to Kafka             │
+│  `parsed-messages`.                                                          │
+│                                                                              │
+│  Each channel has its own processor (e.g. EmailProcessor parses EML →       │
+│  headers, body, attachments).                                                │
+└──────────┬───────────────────────────────────────────────────────────────────┘
+           │  Structured/parsed data → Kafka `parsed-messages`
+           ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STAGE 3 — INGESTION / NORMALIZATION                                        │
+│  Consume from `parsed-messages`. Run the appropriate channel normalizer     │
+│  (via NormalizerRegistry) to produce a NormalizedMessage. Dual-write:       │
+│    • NormalizedMessage → Kafka `normalized-messages`                        │
+│    • NormalizedMessage → S3 archive                                         │
+└──────────┬───────────────────────────────────────────────────────────────────┘
+           │  NormalizedMessage → Kafka `normalized-messages` + S3
+           ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  LOGSTASH → ELASTICSEARCH                                                    │
+│  Logstash consumes `normalized-messages`, transforms, and indexes into ES.  │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Full Pipeline per Channel
+
+```
+Email (IMAP)  ──▶ EmailConnector ──▶ S3 + Kafka(raw-messages)
+                  ──▶ EmailProcessor ──▶ Kafka(parsed-messages)
+                  ──▶ IngestionService (EmailNormalizer) ──▶ Kafka(normalized-messages) + S3
+                  ──▶ Logstash ──▶ Elasticsearch                          ✅ IMPLEMENTED
+
+Teams Chat    ──▶ TeamsChatConnector ──▶ S3 + Kafka(raw-messages)
+                  ──▶ TeamsChatProcessor ──▶ Kafka(parsed-messages)
+                  ──▶ IngestionService (TeamsNormalizer) ──▶ ...           ⬚ TODO
+
+Teams Calls   ──▶ TeamsCallConnector ──▶ S3 + Kafka(raw-messages)
+                  ──▶ TeamsCallProcessor ──▶ Kafka(parsed-messages)
+                  ──▶ IngestionService (TeamsCallNormalizer) ──▶ ...       ⬚ TODO
+
+Unigy Turret  ──▶ UnigyConnector ──▶ S3 + Kafka(raw-messages)
+                  ──▶ UnigyProcessor ──▶ Kafka(parsed-messages)
+                  ──▶ IngestionService (TurretNormalizer) ──▶ ...          ⬚ TODO
+
+Bloomberg Chat──▶ BBChatConnector ──▶ S3 + Kafka(raw-messages)
+                  ──▶ BBChatProcessor ──▶ Kafka(parsed-messages)
+                  ──▶ IngestionService (BloombergNormalizer) ──▶ ...       ⬚ TODO
+
+Bloomberg Email─▶ BBEmailConnector ──▶ S3 + Kafka(raw-messages)
+                  ──▶ BBEmailProcessor ──▶ Kafka(parsed-messages)
+                  ──▶ IngestionService (BloombergEmailNormalizer) ──▶ ...  ⬚ TODO
+```
+
+### System Architecture Diagram
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                              CONNECTOR LAYER                                        │
+│                         STAGE 1 — CONNECTORS                                        │
 │                                                                                     │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐    │
 │  │  Teams    │ │  Teams   │ │  Unigy   │ │Bloomberg │ │Bloomberg │ │  Email   │    │
-│  │  Chat     │ │  Calls   │ │  Turret  │ │  Chat    │ │  Email   │ │ (SMTP/   │    │
-│  │ Connector │ │ Connector│ │ Connector│ │ Connector│ │ Connector│ │  IMAP)   │    │
+│  │  Chat     │ │  Calls   │ │  Turret  │ │  Chat    │ │  Email   │ │  (IMAP)  │    │
+│  │ Connector │ │ Connector│ │ Connector│ │ Connector│ │ Connector│ │ Connector │    │
+│  │  ⬚ TODO  │ │  ⬚ TODO │ │  ⬚ TODO │ │  ⬚ TODO │ │  ⬚ TODO │ │  ✅ DONE │    │
 │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘    │
-│       │             │            │             │             │            │          │
 │       └─────────────┴────────────┴──────┬──────┴─────────────┴────────────┘          │
 │                                         │                                            │
 │                              ┌──────────┴──────────┐                                 │
-│                              │   Connector Plugin   │                                │
-│                              │     Framework        │                                │
+│                              │   BaseConnector      │   Shared framework:             │
+│                              │   Framework          │   Kafka, S3, health,            │
+│                              │                      │   DLQ, retry, TaskGroup         │
 │                              └──────────┬───────────┘                                │
 └─────────────────────────────────────────┼────────────────────────────────────────────┘
-                                          │
+                                          │ → S3 (payload) + Kafka `raw-messages`
                                           ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                            INGESTION API                                            │
+│                         STAGE 2 — PROCESSORS                                        │
 │                                                                                     │
-│  ┌─────────────────┐    ┌──────────────────┐    ┌──────────────────┐               │
-│  │  REST API        │───▶│  Parser /         │───▶│  Schema          │               │
-│  │  Gateway         │    │  Normalizer       │    │  Validation      │               │
-│  └─────────────────┘    └──────────────────┘    └────────┬─────────┘               │
-│                                                          │                          │
-└──────────────────────────────────────────────────────────┼──────────────────────────┘
-                                                           │
-                              ┌─────────────────────────────┤
-                              │                             │
-                              ▼                             ▼
-┌─────────────────────────────────────┐   ┌──────────────────────────────────────────┐
-│          MESSAGE BUS                │   │            RAW STORAGE                   │
-│                                     │   │                                          │
-│  ┌───────────────────────────────┐  │   │  ┌────────────────────────────────────┐  │
-│  │         Apache Kafka          │  │   │  │          S3                 │  │
-│  │                               │  │   │  │                                    │  │
-│  │  topics:                      │  │   │  │  buckets:                          │  │
-│  │    raw-messages               │  │   │  │    /raw       — original payloads  │  │
-│  │    normalized-messages        │  │   │  │    /normalized — normalized records │  │
-│  │    processing-results         │  │   │  │    /audio     — audio files        │  │
-│  │    alerts                     │  │   │  │    /processed — enriched records    │  │
-│  └───────────────────────────────┘  │   │  └────────────────────────────────────┘  │
-│                                     │   │                                          │
-└──────────────────┬──────────────────┘   └──────────────────────────────────────────┘
-                   │
-                   ▼
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐               │
+│  │  Email        │ │  Teams Chat  │ │  Teams Call   │ │  Bloomberg   │               │
+│  │  Processor    │ │  Processor   │ │  Processor    │ │  Processor   │               │
+│  │  ✅ DONE      │ │  ⬚ TODO     │ │  ⬚ TODO      │ │  ⬚ TODO     │               │
+│  └──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └──────┬───────┘               │
+│         └────────────────┴────────────────┴────────────────┘                         │
+│                                    │                                                 │
+└────────────────────────────────────┼─────────────────────────────────────────────────┘
+                                     │ → Kafka `parsed-messages`
+                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                          PROCESSING LAYER                                           │
+│                         STAGE 3 — INGESTION / NORMALIZATION                         │
 │                                                                                     │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐                  │
-│  │  Transcription   │  │  Translation     │  │  NLP             │                  │
-│  │  Service         │  │  Service         │  │  Service         │                  │
-│  │                  │  │                  │  │                  │                  │
-│  │  • Speech-to-    │  │  • Language      │  │  • Entity        │                  │
-│  │    text (audio)  │  │    detection     │  │    recognition   │                  │
-│  │  • Speaker       │  │  • Multi-lang    │  │  • Sentiment     │                  │
-│  │    diarization   │  │    translation   │  │    analysis      │                  │
-│  │  • Audio format  │  │  • Translated    │  │  • Keyword /     │                  │
-│  │    handling      │  │    text indexing  │  │    lexicon match │                  │
-│  └────────┬─────────┘  └────────┬─────────┘  │  • Intent        │                  │
-│           │                     │             │    classification│                  │
-│           │                     │             │  • Alert         │                  │
-│           │                     │             │    generation    │                  │
-│           │                     │             └────────┬─────────┘                  │
-│           └─────────────────────┴──────────────────────┘                            │
-│                                         │                                           │
-└─────────────────────────────────────────┼───────────────────────────────────────────┘
-                                          │
-                                          ▼
+│  ┌─────────────────────┐    ┌──────────────────────┐                                │
+│  │  IngestionService    │───▶│  NormalizerRegistry   │                                │
+│  │  (Kafka consumer)    │    │                        │                                │
+│  │                      │    │  EmailNormalizer  ✅   │                                │
+│  │                      │    │  TeamsNormalizer  ⬚   │                                │
+│  │                      │    │  BloombergNorm.  ⬚   │                                │
+│  │                      │    │  TurretNorm.    ⬚   │                                │
+│  └──────────┬───────────┘    └────────────────────────┘                                │
+│             │                                                                        │
+└─────────────┼────────────────────────────────────────────────────────────────────────┘
+              │ → Kafka `normalized-messages` + S3
+              ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                         SEARCH & STORAGE                                            │
+│                         LOGSTASH + ELASTICSEARCH                                    │
 │                                                                                     │
-│  ┌───────────────────────────────────────────────────────────────────────────────┐  │
-│  │                        Elasticsearch Cluster                                  │  │
-│  │                                                                               │  │
-│  │  indices:                                                                     │  │
-│  │    messages-*        — full normalized + enriched messages                     │  │
-│  │    alerts-*          — generated alerts with scores and metadata               │  │
-│  │    audit-*           — reviewer actions and audit trail                        │  │
-│  └───────────────────────────────────────────────────────────────────────────────┘  │
+│  ┌──────────────────┐        ┌──────────────────────────────────────────────────┐   │
+│  │  Logstash         │──────▶│  Elasticsearch Cluster                           │   │
+│  │  (Kafka consumer, │       │                                                  │   │
+│  │   transforms,     │       │  indices:                                        │   │
+│  │   index to ES)    │       │    messages-*   — normalized + enriched messages  │   │
+│  └──────────────────┘        │    alerts-*     — generated alerts w/ scores      │   │
+│                              │    audit-*      — reviewer actions / audit trail  │   │
+│                              └──────────────────────────────────────────────────┘   │
 │                                                                                     │
-│  ┌───────────────────────────────────────────────────────────────────────────────┐  │
-│  │                            PostgreSQL                                         │  │
-│  │                                                                               │  │
-│  │  tables:                                                                      │  │
-│  │    users / roles     — reviewer accounts and RBAC                             │  │
-│  │    cases             — case management records                                │  │
-│  │    review_decisions  — alert dispositions and escalations                     │  │
-│  │    policies          — lexicons, rules, thresholds                            │  │
-│  └───────────────────────────────────────────────────────────────────────────────┘  │
-│                                                                                     │
-└──────────────────────────────────────────────┬──────────────────────────────────────┘
-                                               │
-                                               ▼
+└──────────────────────────────────┬──────────────────────────────────────────────────┘
+                                   │
+                   ┌───────────────┼───────────────┐
+                   ▼               │               ▼
+┌──────────────────────────────┐   │  ┌───────────────────────────────────────────────────┐
+│         PostgreSQL            │   │  │                    UI LAYER                        │
+│                               │   │  │                                                   │
+│  tables:                      │   │  │  ┌────────────────────┐  ┌─────────────────────┐  │
+│    users / roles              │   │  │  │ UI Backend (API)   │  │ Frontend (SPA)      │  │
+│    policies / lexicons        │   │  │  │                    │  │                     │  │
+│    review_queues / batches    │   │  │  │ • Query ES         │  │ • Alert dashboard   │  │
+│    alerts                     │   │  │  │ • CRUD on PG       │  │ • Message search    │  │
+│    entities / entity_links    │   │  │  │ • Auth / RBAC      │  │ • Entity resolution │  │
+│    alert_generation_jobs      │   │  │  │ • Export/reporting  │  │ • Policy config     │  │
+│    review_decisions           │   │  │  └────────┬───────────┘  │ • Review queues     │  │
+│    audit_log                  │   │  │           │              │ • Audit trail       │  │
+│                               │   │  │           │              └─────────────────────┘  │
+└──────────────────────────────┘   │  │           │                                       │
+                                   │  └───────────┼───────────────────────────────────────┘
+                                   │              │
+                                   ▼              ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                              UI LAYER                                               │
+│                    ANALYTICS & AI LAYER  ⬚ NOT YET IMPLEMENTED                      │
 │                                                                                     │
-│  ┌────────────────────────┐          ┌─────────────────────────────┐                │
-│  │   UI Backend (API)     │◀────────▶│   Frontend (SPA)            │                │
-│  │                        │          │                             │                │
-│  │  • Query Elasticsearch │          │  • Alert review dashboard   │                │
-│  │  • CRUD on PostgreSQL  │          │  • Message search & replay  │                │
-│  │  • Auth / RBAC         │          │  • Case management view     │                │
-│  │  • Export / reporting  │          │  • Policy configuration     │                │
-│  └────────────────────────┘          │  • Audit trail              │                │
-│                                      └─────────────────────────────┘                │
-│                                               │                                     │
-│                                               ▼                                     │
-│                                      ┌─────────────────┐                            │
-│                                      │  Case Manager   │                            │
-│                                      │  (downstream)   │                            │
-│                                      └─────────────────┘                            │
+│  ┌──────────────────────────┐  ┌──────────────────────────┐  ┌───────────────────┐  │
+│  │  RAG Search Engine        │  │  Agentic Review          │  │  Agent Context    │  │
+│  │                           │  │                           │  │  Enrichment       │  │
+│  │  • Vector embeddings of   │  │  • AI agent auto-reviews  │  │                   │  │
+│  │    all indexed messages   │  │    flagged alerts         │  │  • Agent pulls    │  │
+│  │  • Semantic search over   │  │  • Drafts disposition     │  │    related comms, │  │
+│  │    comms (beyond keyword) │  │    recommendations with   │  │    entity history,│  │
+│  │  • Natural-language       │  │    cited evidence         │  │    prior alerts   │  │
+│  │    queries ("show me all  │  │  • Escalates ambiguous    │  │  • Builds rich    │  │
+│  │    comms about XYZ deal") │  │    cases to human review  │  │    context window │  │
+│  │  • Cross-channel context  │  │  • Learns from reviewer   │  │    for reviewer   │  │
+│  │    retrieval              │  │    feedback loop          │  │  • Surfaces prior │  │
+│  │                           │  │  • Configurable autonomy  │  │    decisions on   │  │
+│  │  Vector DB:               │  │    levels per policy      │  │    similar comms  │  │
+│  │  pgvector / Qdrant /      │  │                           │  │                   │  │
+│  │  Weaviate                 │  │  LLM: Claude / minimax    │  │  Feeds into RAG   │  │
+│  └──────────────────────────┘  └──────────────────────────┘  └───────────────────┘  │
+│                                                                                     │
+│  ┌──────────────────────────────────────────────────────────────────────────────┐    │
+│  │  Agentic Workflow Orchestrator                                               │    │
+│  │                                                                              │    │
+│  │  • Orchestrates multi-step review workflows using tool-calling LLM agents   │    │
+│  │  • Tools: ES search, RAG retrieval, entity lookup, policy check, PG query   │    │
+│  │  • Autonomous triage: low-risk auto-close, medium-risk enrich, high-risk    │    │
+│  │    escalate with full context package for human reviewer                     │    │
+│  │  • Audit trail of all agent reasoning steps and decisions                   │    │
+│  └──────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                     │
 └─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. Data Flow
+## 3. Kafka Topics
 
-```
-                    ┌───────────┐
-                    │  Channel  │  (Teams, Bloomberg, Unigy, Email, ...)
-                    └─────┬─────┘
-                          │
-                          ▼
-                    ┌───────────┐
-                    │ Connector │  Poll / webhook / stream
-                    └─────┬─────┘
-                          │  raw payload
-                          ▼
-                    ┌───────────┐
-                    │ Ingestion │  Parse, normalize, validate
-                    │    API    │
-                    └─────┬─────┘
-                          │  normalized message
-                     ┌────┴────┐
-                     │         │
-                     ▼         ▼
-               ┌─────────┐  ┌────┐
-               │  Kafka   │  │ S3 │  Store raw + normalized
-               └────┬────┘  └────┘
-                    │
-          ┌─────────┼─────────┐
-          ▼         ▼         ▼
-     ┌─────────┐ ┌───────┐ ┌─────┐
-     │Transcribe│ │Translate│ │ NLP │  Enrich, detect, alert
-     └────┬────┘ └───┬───┘ └──┬──┘
-          │          │        │
-          └──────────┴────────┘
-                     │  enriched message + alerts
-                     ▼
-              ┌──────────────┐
-              │Elasticsearch │  Index for search & review
-              └──────┬───────┘
-                     │
-                     ▼
-              ┌──────────────┐
-              │   UI Layer   │  Review alerts
-              │ (ES + PG)    │
-              └──────┬───────┘
-                     │  escalated alerts
-                     ▼
-              ┌──────────────┐
-              │ Case Manager │
-              └──────────────┘
-```
+| Topic | Producer | Consumer(s) |
+|---|---|---|
+| `raw-messages` | Connectors (Stage 1) | Processors (Stage 2) |
+| `parsed-messages` | Processors (Stage 2) | IngestionService (Stage 3) |
+| `normalized-messages` | IngestionService (Stage 3) | Logstash → ES |
+| `processing-results` | Processing services (future) | ES indexer |
+| `alerts` | NLP / alert generation | ES indexer, UI backend |
+| `dead-letter` | Any stage (on failure) | Monitoring / manual review |
+| `normalized-messages-dlq` | Logstash (on failure) | Monitoring / manual review |
 
 ---
 
 ## 4. Component Details
 
-### 4.1 Connector Layer
+### 4.1 Connector Layer (Stage 1)
 
-Each connector is a standalone microservice responsible for interfacing with a single communication channel. Connectors share a common interface defined by the **Connector Plugin Framework**, making it straightforward to add new channels.
+Each connector is a standalone microservice responsible for interfacing with a single communication channel. Connectors share a common base class (`BaseConnector`) that provides Kafka producer, S3 client, health server, dead-letter handler, and retry logic via `asyncio.TaskGroup`.
 
-| Connector | Channel Type | Integration Method | Data Type |
+| Connector | Channel Type | Integration Method | Data Type | Status |
+|---|---|---|---|---|
+| Email (IMAP) | eComm | IMAP polling | Text, attachments (EML) | ✅ Done |
+| Teams Chat | eComm | Microsoft Graph API (webhooks + polling) | Text, attachments | ⬚ TODO |
+| Teams Calls | aComm | Microsoft Graph Call Records API | Audio (WAV/OGG) | ⬚ TODO |
+| Unigy Turret | aComm | Unigy REST/SFTP export | Audio (WAV) | ⬚ TODO |
+| Bloomberg Chat | eComm | Bloomberg SAPI / B-Pipe | Text, attachments | ⬚ TODO |
+| Bloomberg Email | eComm | Bloomberg MSG export / SFTP | Text, attachments | ⬚ TODO |
+
+**Adding a new connector:** Subclass `BaseConnector`, implement `ingest() -> AsyncIterator[RawMessage]`, and deploy as a new Kubernetes deployment. The framework handles Kafka production, S3 upload, retry logic, and dead-letter routing.
+
+### 4.2 Processor Layer (Stage 2)
+
+Each processor consumes `RawMessage` records from Kafka `raw-messages`, downloads the payload from S3, parses the channel-specific format into structured data, and publishes to Kafka `parsed-messages`.
+
+| Processor | Input Format | Output | Status |
 |---|---|---|---|
-| Teams Chat | eComm | Microsoft Graph API (webhooks + polling) | Text, attachments |
-| Teams Calls | aComm | Microsoft Graph Call Records API | Audio (WAV/OGG) |
-| Unigy Turret | aComm | Unigy REST/SFTP export | Audio (WAV) |
-| Bloomberg Chat | eComm | Bloomberg SAPI / B-Pipe | Text, attachments |
-| Bloomberg Email | eComm | Bloomberg MSG export / SFTP | Text, attachments |
-| Email (SMTP/IMAP) | eComm | IMAP polling / Journaling endpoint | Text, attachments (EML) |
+| EmailProcessor | EML files (RFC 5322) | Headers, body, attachments | ✅ Done |
+| TeamsChatProcessor | Graph API JSON | Messages, reactions, threads | ⬚ TODO |
+| TeamsCallProcessor | Call recording + metadata | Audio ref + call metadata | ⬚ TODO |
+| UnigyProcessor | WAV + call metadata | Audio ref + turret metadata | ⬚ TODO |
+| BloombergChatProcessor | SAPI messages | Chat messages, attachments | ⬚ TODO |
+| BloombergEmailProcessor | MSG export | Headers, body, attachments | ⬚ TODO |
 
-**Adding a new connector:** Implement the `ConnectorInterface` (ingest, health-check, backfill) and deploy as a new Kubernetes deployment. The framework handles registration, retry logic, and dead-letter routing.
+### 4.3 Ingestion / Normalization (Stage 3)
 
-### 4.2 Ingestion API
+The `IngestionService` consumes from `parsed-messages`, selects the appropriate normalizer from the `NormalizerRegistry` based on `Channel`, and produces a `NormalizedMessage` in the canonical schema. It dual-writes to Kafka `normalized-messages` and S3.
 
-A centralized REST API gateway that all connectors push data into. Responsibilities:
+**Normalized message schema:**
+```json
+{
+  "message_id":    "string",
+  "channel":       "enum (email, teams_chat, teams_call, bloomberg, turret, ...)",
+  "direction":     "inbound | outbound | internal",
+  "timestamp":     "ISO-8601",
+  "participants":  [{ "id", "name", "role" }],
+  "body_text":     "string | null",
+  "audio_ref":     "S3 URI | null",
+  "attachments":   [{ "name", "type", "s3_uri" }],
+  "metadata":      { "channel-specific fields" }
+}
+```
 
-- **Authentication** — mTLS between connectors and the API
-- **Parsing** — extract structured fields from each channel's raw format
-- **Normalization** — map every message to a unified schema:
-  ```
-  {
-    "message_id":    string,
-    "channel":       enum,
-    "direction":     "inbound" | "outbound" | "internal",
-    "timestamp":     ISO-8601,
-    "participants":  [ { "id", "name", "role" } ],
-    "body_text":     string | null,
-    "audio_ref":     S3 URI | null,
-    "attachments":   [ { "name", "type", "s3_uri" } ],
-    "metadata":      { channel-specific fields }
-  }
-  ```
-- **Dual write** — publish to Kafka topic `normalized-messages` and persist to S3
+**Adding a new normalizer:** Subclass `BaseNormalizer`, implement the normalization logic, and register in the `NormalizerRegistry` mapping `Channel` → normalizer class.
 
-### 4.3 Message Bus (Kafka)
+### 4.4 Message Bus (Kafka)
 
-Apache Kafka acts as the central nervous system. Key topics:
+Apache Kafka (KRaft mode, single-node dev / 3-broker prod) acts as the central nervous system. At-least-once delivery ensures no messages are lost. Each stage consumes independently at its own pace.
 
-| Topic | Producer | Consumer(s) |
-|---|---|---|
-| `raw-messages` | Connectors | Ingestion API |
-| `normalized-messages` | Ingestion API | Processing services, S3 archiver |
-| `processing-results` | Processing services | Elasticsearch indexer |
-| `alerts` | NLP service | Elasticsearch indexer, UI backend |
-
-Kafka ensures at-least-once delivery and allows each processing service to consume independently at its own pace.
-
-### 4.4 Raw Storage (S3)
+### 4.5 Raw Storage (S3 / MinIO)
 
 All data is persisted to S3 for long-term retention and regulatory audit requirements:
 
-- `/raw/` — original payloads as received from connectors
+- `/raw/` — original payloads as received from connectors (claim-check)
 - `/normalized/` — normalized JSON records
 - `/audio/` — audio files (calls) referenced by `audio_ref`
-- `/processed/` — enriched records post-processing
 
 Lifecycle policies enforce retention periods per regulatory requirements (e.g., 7 years for FINRA/MiFID II).
 
-### 4.5 Processing Layer
+### 4.6 Processing Layer (Future)
 
-Three independent microservices consume from Kafka and publish enriched results back.
+Three independent microservices will consume from Kafka and publish enriched results back:
 
 #### Transcription Service
 - Consumes messages with `audio_ref` set
@@ -283,43 +321,86 @@ Three independent microservices consume from Kafka and publish enriched results 
 - Publishes translated text alongside original to `processing-results`
 
 #### NLP Service
-- **Lexicon / keyword matching** — configurable watchlists (e.g., "guarantee", "off the record", insider terms)
+- **Lexicon / keyword matching** — configurable watchlists
 - **Named entity recognition** — people, organizations, securities, monetary values
 - **Sentiment analysis** — flag aggressive or unusual tone
 - **Intent classification** — detect potential policy violations
 - **Alert generation** — score each message against configured policies, generate alerts above threshold
 - Publishes enriched records to `processing-results` and alerts to `alerts`
 
-### 4.6 Search & Storage Layer
+### 4.7 Search & Storage Layer
 
 #### Elasticsearch Cluster
-- Indexes enriched messages for full-text and structured search
+- Logstash consumes `normalized-messages` from Kafka, transforms, and indexes into ES
+- Stores messages for full-text and structured search
 - Stores generated alerts with risk scores, matched policies, and highlighted excerpts
 - Maintains audit trail of reviewer actions
 
 #### PostgreSQL
 - Stores application state: user accounts, RBAC, review decisions
-- Manages case records and escalation workflows
-- Holds policy/lexicon configuration used by the NLP service
+- Manages review queues, batches, and alert generation jobs
+- Holds policy/lexicon configuration
+- Entity resolution tables (entities, entity_links)
+- Audit log
 
-### 4.7 UI Layer
+### 4.8 UI Layer
 
-A custom single-page application backed by an API server.
+A custom single-page application backed by a FastAPI server.
 
 **UI Backend (API)**
-- Queries Elasticsearch for alert search, message retrieval, and analytics
-- CRUD operations on PostgreSQL for cases, decisions, and policies
+- Queries Elasticsearch for message search and retrieval
+- CRUD operations on PostgreSQL for alerts, policies, queues, entities
+- Alert generation (ES percolator queries against policies)
 - Handles authentication (SSO/OIDC) and role-based access control
 - Provides export/reporting endpoints
 
-**Frontend (SPA)**
-- **Alert Review Dashboard** — queue of alerts sorted by risk score, filterable by channel, date, policy, reviewer assignment
-- **Message Search & Replay** — full-text search across all indexed communications, audio playback for calls with synchronized transcript
-- **Case Management** — group related alerts into cases, add notes, escalate or close
+**Frontend (SPA — React + TypeScript)**
+- **Alert Review Dashboard** — queue of alerts sorted by risk score, filterable by channel, date, policy
+- **Message Search** — full-text search across all indexed communications
+- **Entity Resolution** — view and manage resolved entities across channels
+- **Review Queues** — batch-based review workflow
 - **Policy Configuration** — manage lexicons, rules, and thresholds
 - **Audit Trail** — full log of who reviewed what and when
 
-**Case Manager Integration** — alerts escalated from the review UI are forwarded to an external case management system via API or webhook.
+### 4.9 Analytics & AI Layer (Future)
+
+> **Not yet implemented.** This layer sits on top of ES + PG and powers intelligent search, automated review, and context enrichment.
+
+#### RAG Search Engine
+- Generate vector embeddings for all indexed messages (body text, transcripts, attachments)
+- Enable **semantic search** beyond keyword matching — natural-language queries like "show me all comms discussing the XYZ acquisition" return relevant results even without exact keyword matches
+- **Cross-channel context retrieval** — find related conversations across email, chat, and voice for a given entity, topic, or time window
+- Vector store options: pgvector (co-located with PG), Qdrant, or Weaviate
+- Embedding models: OpenAI `text-embedding-3-large`, Cohere, or self-hosted (e.g. BGE)
+
+#### Agentic Review
+- AI agent **automatically reviews flagged alerts** using tool-calling LLM (Claude / GPT-4)
+- Agent has access to tools: ES search, RAG retrieval, entity lookup, policy definitions, PG queries, prior review decisions
+- For each alert, the agent:
+  1. Retrieves the flagged message + surrounding conversation context
+  2. Pulls entity history, prior alerts, and related comms via RAG
+  3. Evaluates against applicable policies
+  4. Drafts a **disposition recommendation** with cited evidence
+- **Configurable autonomy levels** per policy type:
+  - *Auto-close*: low-risk alerts (e.g. false-positive keyword hits) closed automatically with audit trail
+  - *Enrich & recommend*: medium-risk alerts enriched with context, recommendation drafted for human reviewer
+  - *Escalate*: high-risk alerts packaged with full context and escalated immediately
+- Learns from reviewer feedback — accepted/overturned recommendations feed back into prompt tuning and threshold calibration
+
+#### Agent Context Enrichment
+- When a human reviewer opens an alert, an agent **pre-builds a rich context package**:
+  - Related communications from the same participants (across all channels)
+  - Entity profile: role, department, communication patterns, prior alert history
+  - Prior review decisions on similar messages or involving the same entities
+  - Policy explanation and relevant regulatory guidance
+- Surfaces **"reviewers who saw similar alerts decided..."** patterns to reduce review time
+- Context is assembled on-demand via RAG retrieval + structured PG queries
+
+#### Agentic Workflow Orchestrator
+- Orchestrates multi-step review workflows using tool-calling LLM agents
+- Available tools: ES search, RAG retrieval, entity lookup, policy check, PG query, case creation
+- Full audit trail of all agent reasoning steps, tool calls, and decisions for regulatory defensibility
+- Human-in-the-loop: agents never take final action on high-risk items without human approval
 
 ---
 
@@ -335,18 +416,18 @@ A custom single-page application backed by an API server.
 │  │ deploy   │ │ deploy   │ │  deploy  │ │  deploy  │  │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────┘  │
 │  ┌──────────┐ ┌──────────┐                              │
-│  │bb-email  │ │  email   │                              │
+│  │bb-email  │ │  email   │  (connector + processor)     │
 │  │ deploy   │ │  deploy  │                              │
 │  └──────────┘ └──────────┘                              │
 │                                                         │
 │  namespace: umbrella-ingestion                         │
 │  ┌──────────────────────┐                               │
-│  │  ingestion-api       │  (HPA: 2–10 replicas)        │
+│  │  ingestion-service   │  (HPA: 2–10 replicas)        │
 │  └──────────────────────┘                               │
 │                                                         │
 │  namespace: umbrella-streaming                         │
 │  ┌──────────────────────┐                               │
-│  │  kafka (StatefulSet) │  (3 brokers + ZK or KRaft)   │
+│  │  kafka (StatefulSet) │  (KRaft, 3 brokers prod)     │
 │  └──────────────────────┘                               │
 │                                                         │
 │  namespace: umbrella-processing                        │
@@ -358,7 +439,11 @@ A custom single-page application backed by an API server.
 │  namespace: umbrella-storage                           │
 │  ┌──────────────────────┐ ┌──────────────────────┐     │
 │  │  elasticsearch       │ │  postgresql          │     │
-│  │  (StatefulSet, 3+)   │ │  (StatefulSet, HA)   │     │
+│  │  (StatefulSet)       │ │  (StatefulSet, HA)   │     │
+│  └──────────────────────┘ └──────────────────────┘     │
+│  ┌──────────────────────┐ ┌──────────────────────┐     │
+│  │  logstash            │ │  minio (S3)          │     │
+│  │  (Deployment)        │ │  (StatefulSet)       │     │
 │  └──────────────────────┘ └──────────────────────┘     │
 │                                                         │
 │  namespace: umbrella-ui                                │
@@ -366,6 +451,13 @@ A custom single-page application backed by an API server.
 │  │  ui-backend          │ │  ui-frontend (nginx) │     │
 │  │  deploy (HPA)        │ │  deploy              │     │
 │  └──────────────────────┘ └──────────────────────┘     │
+│                                                         │
+│  namespace: umbrella-analytics  ⬚ FUTURE              │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐    │
+│  │ rag-search   │ │ agent-review │ │ vector-db    │    │
+│  │  deploy      │ │   deploy     │ │ (pgvector /  │    │
+│  │              │ │              │ │  qdrant)     │    │
+│  └──────────────┘ └──────────────┘ └──────────────┘    │
 │                                                         │
 │  namespace: umbrella-infra                             │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐               │
@@ -375,40 +467,69 @@ A custom single-page application backed by an API server.
 │                                                         │
 └─────────────────────────────────────────────────────────┘
 
-         External:  S3 (object storage)
+         External:  S3 (object storage) / MinIO (on-prem)
 ```
 
 ---
 
 ## 6. Technology Summary
 
-| Layer | Technology                                       |
-|---|--------------------------------------------------|
-| Connectors | Python / Go microservices, channel-specific SDKs |
-| Ingestion API | Go or Python (FastAPI), OpenAPI spec             |
-| Message Bus | Apache Kafka (KRaft mode)                        |
-| Object Storage | S3 (or MinIO for on-prem)                        |
-| Transcription | OpenAI Whisper / Azure Speech Services           |
-| Translation | Azure Translator / Cloud Translate               |
-| NLP | spaCy, custom models, lexicon engine             |
-| Search | Elasticsearch 9.x                                |
-| Application DB | PostgreSQL 16                                    |
-| Frontend | React + TypeScript                               |
-| UI Backend | Python (FastAPI)    |
-| Orchestration | Kubernetes (EKS / AKS / GKE)                     |
-| CI/CD | GitHub Actions, Helm, ArgoCD                     |
-| Observability | Prometheus, Grafana, OpenTelemetry               |
+| Layer | Technology |
+|---|---|
+| Connectors | Python async microservices, channel-specific SDKs |
+| Connector Framework | `umbrella-connector-framework` (BaseConnector, RawMessage, NormalizedMessage) |
+| Ingestion Service | Python (async Kafka consumer), NormalizerRegistry |
+| Message Bus | Apache Kafka (KRaft mode) |
+| Object Storage | S3 / MinIO (on-prem) |
+| Transcription | OpenAI Whisper / Azure Speech Services |
+| Translation | Azure Translator / Cloud Translate |
+| NLP | spaCy, custom models, lexicon engine |
+| Search | Elasticsearch 9.x via Logstash |
+| Application DB | PostgreSQL 16 |
+| Frontend | React + TypeScript (Vite) |
+| UI Backend | Python (FastAPI) |
+| Orchestration | Kubernetes (Minikube dev / EKS prod) |
+| CI/CD | GitHub Actions, Helm, ArgoCD |
+| Observability | Prometheus, Grafana, OpenTelemetry |
+| RAG / Vector Search | pgvector or Qdrant + embedding models (future) |
+| Agentic AI | Claude / GPT-4 tool-calling agents (future) |
 
 ---
 
-## 7. Next Steps
+## 7. Implementation Status & Next Steps
 
-1. **Define the normalized message schema** — finalize the canonical data model shared across all services
-2. **Scaffold the monorepo** — set up project structure, shared libraries, CI/CD pipelines
-3. **Build the connector plugin framework** — define the interface, implement the first connector (e.g., Email)
-4. **Stand up Kafka + S3** — deploy the message bus and object storage
-5. **Implement the ingestion API** — parser, normalizer, dual-write to Kafka and S3
-6. **Build the processing services** — transcription, translation, NLP (can be parallelized)
-7. **Deploy Elasticsearch + PostgreSQL** — configure indices and database schema
-8. **Build the UI** — alert review dashboard, search, case management
-9. **Integrate with case manager** — define the escalation API contract
+### Completed
+- [x] Normalized message schema (`NormalizedMessage` in connector-framework)
+- [x] Connector plugin framework (`BaseConnector`, Kafka, S3, DLQ, retry)
+- [x] Email connector (IMAP → S3 + Kafka `raw-messages`)
+- [x] Email processor (Kafka `raw-messages` → parse EML → Kafka `parsed-messages`)
+- [x] Ingestion service with `EmailNormalizer` (Kafka `parsed-messages` → normalize → Kafka `normalized-messages` + S3)
+- [x] Kafka (KRaft single-node) + S3 (MinIO) infrastructure
+- [x] Elasticsearch + Logstash (Kafka `normalized-messages` → ES index)
+- [x] PostgreSQL schema (users, roles, policies, alerts, entities, review queues, audit)
+- [x] UI Backend (FastAPI — ES queries, PG CRUD, alert generation, policies, queues, entities)
+- [x] UI Frontend (React — alerts dashboard, message search, entities, policies, review queues)
+
+### Next — Replicate Pipeline for All Channels
+1. **Teams Chat** — connector (Graph API polling/webhooks), processor (JSON → structured), normalizer
+2. **Teams Calls** — connector (Call Records API), processor (recording + metadata), normalizer
+3. **Bloomberg Chat** — connector (SAPI/B-Pipe), processor (SAPI messages → structured), normalizer
+4. **Bloomberg Email** — connector (MSG export/SFTP), processor (MSG → structured), normalizer
+5. **Unigy Turret** — connector (REST/SFTP), processor (WAV + metadata), normalizer
+
+### Future Processing Services
+6. **Transcription service** — speech-to-text + diarization for audio channels
+7. **Translation service** — language detection + translation for multilingual content
+8. **NLP service** — lexicon matching, NER, sentiment, intent classification, alert generation
+
+### Analytics & AI Layer
+9. **RAG search engine** — vector embeddings of all messages, semantic search, cross-channel context retrieval
+10. **Agentic review** — AI agents auto-review alerts, draft dispositions with cited evidence, configurable autonomy levels
+11. **Agent context enrichment** — pre-build rich context packages for human reviewers (related comms, entity history, prior decisions)
+12. **Agentic workflow orchestrator** — multi-step review workflows with tool-calling LLM agents, full audit trail
+
+### Platform Maturity
+13. **Auth / SSO** — OIDC integration for UI
+14. **Case management** — case escalation workflow + external CM integration
+15. **Observability** — Prometheus + Grafana dashboards, OpenTelemetry tracing
+16. **Production hardening** — HA Kafka (3-broker), ES cluster sizing, HPA tuning

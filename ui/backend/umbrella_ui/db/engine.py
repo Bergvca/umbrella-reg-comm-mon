@@ -16,7 +16,7 @@ def _make_session_factory(engine):
 
 
 class DatabaseEngines:
-    """Holds all four engines and their session factories.
+    """Holds all engines and their session factories.
 
     Created once at startup and stored on ``app.state``.
     """
@@ -26,14 +26,17 @@ class DatabaseEngines:
         self.policy_engine = _make_engine(settings.policy_database_url)
         self.alert_engine = _make_engine(settings.alert_database_url)
         self.review_engine = _make_engine(settings.review_database_url)
+        self.entity_engine = _make_engine(settings.entity_database_url)
 
         self.iam_session = _make_session_factory(self.iam_engine)
         self.policy_session = _make_session_factory(self.policy_engine)
         self.alert_session = _make_session_factory(self.alert_engine)
         self.review_session = _make_session_factory(self.review_engine)
+        self.entity_session = _make_session_factory(self.entity_engine)
 
     async def close(self) -> None:
         await self.iam_engine.dispose()
         await self.policy_engine.dispose()
         await self.alert_engine.dispose()
         await self.review_engine.dispose()
+        await self.entity_engine.dispose()

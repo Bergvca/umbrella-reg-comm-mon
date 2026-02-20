@@ -15,7 +15,7 @@ from umbrella_ui.db.models.alert import Alert
 from umbrella_ui.db.models.policy import Policy, Rule
 from umbrella_ui.deps import get_alert_session, get_es
 from umbrella_ui.es.models import AlertStats, AlertStatsBucket, AlertTimePoint, ESMessage
-from umbrella_ui.es.queries import build_alert_stats, build_batch_fetch_messages
+from umbrella_ui.es.queries import build_batch_fetch_messages
 from umbrella_ui.schemas.alert import AlertOut, AlertStatusUpdate, AlertWithMessage
 from umbrella_ui.schemas.common import PaginatedResponse
 
@@ -26,43 +26,57 @@ _VALID_STATUSES = {"open", "in_review", "closed"}
 
 @router.get("/stats", response_model=AlertStats)
 async def get_alert_stats(
-    es: Annotated[AsyncElasticsearch, Depends(get_es)],
+    session: Annotated[AsyncSession, Depends(get_alert_session)],
     _user: Annotated[dict, Depends(require_role("supervisor"))],
     date_from: str | None = Query(default=None),
     date_to: str | None = Query(default=None),
     severity: str | None = Query(default=None),
 ):
-    """ES aggregations for dashboard stats."""
+    """Dashboard stats — aggregated from PostgreSQL."""
     from datetime import datetime as _dt
 
-    _date_from = _dt.fromisoformat(date_from) if date_from else None
-    _date_to = _dt.fromisoformat(date_to) if date_to else None
+    filters = []
+    if date_from:
+        filters.append(Alert.created_at >= _dt.fromisoformat(date_from))
+    if date_to:
+        filters.append(Alert.created_at <= _dt.fromisoformat(date_to))
+    if severity:
+        filters.append(Alert.severity == severity)
 
-    resp = await es.search(
-        index="alerts-*",
-        body=build_alert_stats(date_from=_date_from, date_to=_date_to, severity=severity),
-    )
-    aggs = resp.get("aggregations", {})
+    where = filters if filters else []
 
-    def _buckets(key: str) -> list[AlertStatsBucket]:
-        return [
-            AlertStatsBucket(key=str(b["key"]), doc_count=b["doc_count"])
-            for b in aggs.get(key, {}).get("buckets", [])
-        ]
+    # by_severity
+    sev_stmt = select(Alert.severity, func.count()).group_by(Alert.severity)
+    if where:
+        sev_stmt = sev_stmt.where(*where)
+    sev_rows = (await session.execute(sev_stmt)).all()
 
-    over_time = [
-        AlertTimePoint(
-            key_as_string=b["key_as_string"],
-            doc_count=b["doc_count"],
-        )
-        for b in aggs.get("over_time", {}).get("buckets", [])
-    ]
+    # by_status
+    status_stmt = select(Alert.status, func.count()).group_by(Alert.status)
+    if where:
+        status_stmt = status_stmt.where(*where)
+    status_rows = (await session.execute(status_stmt)).all()
+
+    # over_time (group by day)
+    day = func.date_trunc("day", Alert.created_at).label("day")
+    time_stmt = select(day, func.count()).group_by(day).order_by(day)
+    if where:
+        time_stmt = time_stmt.where(*where)
+    time_rows = (await session.execute(time_stmt)).all()
+
+    # by_channel
+    chan_stmt = select(Alert.channel, func.count()).group_by(Alert.channel)
+    if where:
+        chan_stmt = chan_stmt.where(*where)
+    chan_rows = (await session.execute(chan_stmt)).all()
 
     return AlertStats(
-        by_severity=_buckets("by_severity"),
-        by_channel=_buckets("by_channel"),
-        by_status=_buckets("by_status"),
-        over_time=over_time,
+        by_severity=[AlertStatsBucket(key=r[0], doc_count=r[1]) for r in sev_rows],
+        by_channel=[AlertStatsBucket(key=r[0], doc_count=r[1]) for r in chan_rows],
+        by_status=[AlertStatsBucket(key=r[0], doc_count=r[1]) for r in status_rows],
+        over_time=[
+            AlertTimePoint(key_as_string=r[0].isoformat(), doc_count=r[1]) for r in time_rows
+        ],
     )
 
 

@@ -1,17 +1,29 @@
 #!/usr/bin/env bash
-# End-to-end pipeline test in minikube
+# End-to-end pipeline test in minikube.
 #
-# Tests the full 4-stage pipeline:
-#   Stage 1: IMAP Connector (EmailConnector polls mailserver via IMAP)
-#   Stage 2: Email Processor (parse EML from S3)
-#   Stage 3: Ingestion Service (normalize parsed message)
-#   Stage 4: Logstash → Elasticsearch (index normalized message)
+# Assumes the cluster is already deployed (run scripts/deploy-minikube.sh first).
 #
-# NOTE: This script skips optional monitoring resources (PodMonitor, ServiceMonitor)
-# that require Prometheus Operator. The pipeline works fine without them.
+# This script:
+#   1. Creates per-schema DB roles
+#   2. Seeds a test user for auth
+#   3. Sends a test email through the pipeline
+#   4. Verifies all 10 stages:
+#      Stage 1: IMAP Connector (EmailConnector polls mailserver via IMAP)
+#      Stage 2: Email Processor (parse EML from S3)
+#      Stage 3: Ingestion Service (normalize parsed message)
+#      Stage 4: Logstash → Elasticsearch (index normalized message)
+#      Stage 5: UI API message search (query ES via backend)
+#      Stage 6: UI login + auth (PostgreSQL + RBAC)
+#      Stage 7: Seed fraud policy/rule/alert (PostgreSQL)
+#      Stage 8: Alert review E2E (submit decision + verify audit log)
+#      Stage 9: Entity resolution (CRUD entities + handles via API)
+#      Stage 10: Batch alert generation (generate alerts from policies via API)
+# Re-exec under bash if invoked with sh/dash
+[ -z "$BASH_VERSION" ] && exec bash "$0" "$@"
+
 set -e
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
 echo "=========================================="
@@ -23,67 +35,19 @@ echo ""
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
-}
+info()  { printf "${GREEN}[INFO]${NC} %s\n" "$1"; }
+warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
+error() { printf "${RED}[ERROR]${NC} %s\n" "$1"; }
 
-warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
-
-error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# 1. Start minikube (if not running)
-info "Checking minikube status..."
-if ! minikube status &>/dev/null; then
-    warn "Minikube not running. Starting minikube..."
-    minikube start --memory=8192 --cpus=4
-else
-    info "Minikube is already running"
+# Verify the cluster is reachable before doing anything
+if ! kubectl get ns umbrella-storage &>/dev/null; then
+    error "umbrella-storage namespace not found. Run scripts/deploy-minikube.sh first."
+    exit 1
 fi
 
-# 2. Point Docker to minikube's daemon
-info "Configuring Docker to use minikube's daemon..."
-eval $(minikube docker-env)
-
-# 3. Build Python service images (with --no-cache to pick up code changes)
-info "Building Docker images..."
-docker build --no-cache -f connectors/email/Dockerfile -t umbrella-email:latest .
-docker build --no-cache -f ingestion-api/Dockerfile -t umbrella-ingestion:latest .
-docker build --no-cache -f ui/backend/Dockerfile -t umbrella-ui-backend:latest .
-docker build --no-cache -f ui/frontend/Dockerfile -t umbrella-ui-frontend:latest .
-
-# 4. Deploy infrastructure (order matters — dependencies first)
-info "Deploying umbrella-streaming (Kafka)..."
-kubectl apply -f deploy/k8s/umbrella-streaming/namespace.yaml
-
-# Apply Kafka manifests individually, skipping optional monitoring resources
-for file in deploy/k8s/umbrella-streaming/*.yaml; do
-    # Skip namespace (already applied) and optional monitoring resources
-    if [[ "$file" != *"namespace.yaml" ]] && [[ "$file" != *"podmonitor.yaml" ]]; then
-        kubectl apply -f "$file"
-    fi
-done
-
-info "Waiting for Kafka to be ready..."
-kubectl rollout status statefulset/kafka -n umbrella-streaming --timeout=180s
-
-info "Deploying umbrella-storage (MinIO + Elasticsearch + Logstash)..."
-kubectl apply -f deploy/k8s/umbrella-storage/namespace.yaml
-
-info "Deploying PostgreSQL..."
-kubectl apply -f deploy/k8s/umbrella-storage/postgresql/
-kubectl rollout status statefulset/postgresql -n umbrella-storage --timeout=180s
-
-# Wait for Flyway migrations to complete
-info "Waiting for PostgreSQL migrations to complete..."
-kubectl wait --for=condition=complete job/postgresql-migrations -n umbrella-storage --timeout=120s
-
-# Create per-schema DB roles (init-roles.sql is in the configmap but nothing executes it)
+# ─── Step 1: Create per-schema DB roles ───────────────────────────────────────
 info "Creating database roles..."
 PG_POD=$(kubectl get pod -n umbrella-storage -l app=postgresql -o jsonpath='{.items[0].metadata.name}')
 kubectl exec -n umbrella-storage "$PG_POD" -- psql -U postgres -d umbrella -c "
@@ -100,6 +64,9 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'review_rw') THEN
         CREATE ROLE review_rw LOGIN PASSWORD 'changeme-review';
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'entity_rw') THEN
+        CREATE ROLE entity_rw LOGIN PASSWORD 'changeme-entity';
     END IF;
 
     -- Grant schema usage and table permissions
@@ -132,63 +99,22 @@ BEGIN
     ALTER DEFAULT PRIVILEGES IN SCHEMA iam    GRANT SELECT ON TABLES TO policy_rw, alert_rw, review_rw;
     ALTER DEFAULT PRIVILEGES IN SCHEMA policy GRANT SELECT ON TABLES TO alert_rw, review_rw;
     ALTER DEFAULT PRIVILEGES IN SCHEMA alert  GRANT SELECT ON TABLES TO review_rw;
+
+    -- Entity schema grants (only if V7 migration has been applied)
+    IF EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'entity') THEN
+        GRANT USAGE ON SCHEMA entity TO entity_rw;
+        GRANT USAGE ON SCHEMA iam    TO entity_rw;
+        GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA entity TO entity_rw;
+        GRANT SELECT ON ALL TABLES IN SCHEMA iam TO entity_rw;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA entity GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO entity_rw;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA iam    GRANT SELECT ON TABLES TO entity_rw;
+    END IF;
 END
 \$\$;
 "
 
-info "Deploying MinIO..."
-kubectl apply -f deploy/k8s/umbrella-storage/minio/
-kubectl rollout status deployment/minio -n umbrella-storage --timeout=120s
-
-info "Deploying Elasticsearch..."
-kubectl apply -f deploy/k8s/umbrella-storage/elasticsearch/
-kubectl rollout status statefulset/elasticsearch -n umbrella-storage --timeout=300s
-
-info "Deploying Logstash..."
-kubectl apply -f deploy/k8s/umbrella-storage/logstash/
-kubectl rollout status deployment/logstash -n umbrella-storage --timeout=300s
-
-info "Deploying Kibana..."
-kubectl apply -f deploy/k8s/umbrella-storage/kibana/
-kubectl rollout status deployment/kibana -n umbrella-storage --timeout=300s
-
-# 5. Deploy mailserver (SMTP/IMAP for Stage 1)
-info "Deploying mailserver..."
-kubectl apply -f deploy/k8s/umbrella-connectors/namespace.yaml
-kubectl apply -f deploy/k8s/umbrella-connectors/mailserver-deployment.yaml
-info "Waiting for mailserver to be ready..."
-kubectl rollout status deployment/mailserver -n umbrella-connectors --timeout=300s
-
-# 6. Deploy Python services
-info "Deploying email-processor (Stage 2)..."
-kubectl apply -f deploy/k8s/umbrella-connectors/email-processor-deployment.yaml
-kubectl wait --for=condition=ready pod -l app=email-processor -n umbrella-connectors --timeout=300s
-
-info "Deploying email-connector (Stage 1)..."
-kubectl apply -f deploy/k8s/umbrella-connectors/email-connector-deployment.yaml
-kubectl wait --for=condition=ready pod -l app=email-connector -n umbrella-connectors --timeout=300s
-
-info "Deploying ingestion-service (Stage 3)..."
-kubectl apply -f deploy/k8s/umbrella-ingestion/namespace.yaml
-kubectl apply -f deploy/k8s/umbrella-ingestion/
-kubectl wait --for=condition=ready pod -l app=ingestion-service -n umbrella-ingestion --timeout=120s
-
-info "Deploying umbrella-ui (backend + frontend)..."
-kubectl apply -f deploy/k8s/umbrella-ui/namespace.yaml
-kubectl apply -f deploy/k8s/umbrella-ui/secret.yaml
-kubectl apply -f deploy/k8s/umbrella-ui/backend/
-kubectl apply -f deploy/k8s/umbrella-ui/frontend/
-
-info "Waiting for UI backend to be ready..."
-kubectl rollout status deployment/umbrella-ui-backend -n umbrella-ui --timeout=120s
-
-info "Waiting for UI frontend to be ready..."
-kubectl rollout status deployment/umbrella-ui-frontend -n umbrella-ui --timeout=60s
-
-# Insert test user into PostgreSQL for Stage 6 auth check.
-# Exec directly into the running PostgreSQL pod (avoids DNS + new-pod issues).
+# ─── Step 2: Seed test user ───────────────────────────────────────────────────
 info "Seeding test user for UI authentication check..."
-PG_POD=$(kubectl get pod -n umbrella-storage -l app=postgresql -o jsonpath='{.items[0].metadata.name}')
 kubectl exec -n umbrella-storage "$PG_POD" -- \
   psql -U postgres -d umbrella -c "
 INSERT INTO iam.users (id, username, email, password_hash, is_active)
@@ -211,14 +137,14 @@ SELECT '00000000-0000-0000-0000-000000000010', id FROM iam.roles WHERE name = 'a
 ON CONFLICT DO NOTHING;
 "
 
-info "All services deployed successfully!"
+info "All roles and seed data applied."
 echo ""
 
-# 7. Wait a bit for services to stabilize
+# ─── Step 3: Wait for services to stabilise ───────────────────────────────────
 info "Waiting 10 seconds for services to stabilize..."
 sleep 10
 
-# 8. Send test email via SMTP to mailserver
+# ─── Step 4: Send test email via SMTP ─────────────────────────────────────────
 info "Sending test email via SMTP..."
 kubectl delete pod smtp-sender -n umbrella-connectors --ignore-not-found 2>/dev/null || true
 kubectl run smtp-sender --rm -i --image=umbrella-email:latest --image-pull-policy=Never \
@@ -244,7 +170,7 @@ with smtplib.SMTP('mailserver.umbrella-connectors.svc', 25) as s:
 info "Test email sent to testuser@umbrella.local"
 echo ""
 
-# 9. Wait for pipeline to process (45s for 4-stage propagation)
+# ─── Step 5: Wait for pipeline to process ────────────────────────────────────
 info "Waiting 45 seconds for pipeline to process the message..."
 for i in {45..1}; do
     echo -ne "\rWaiting... ${i}s "
@@ -253,11 +179,11 @@ done
 echo ""
 echo ""
 
-# 10. Verify: check each stage
+# ─── Stage verification ───────────────────────────────────────────────────────
 info "Verifying message flow through pipeline..."
 echo ""
 
-# Check raw-messages topic (Stage 1 output)
+# Stage 1: raw-messages topic
 info "Checking raw-messages topic (Stage 1)..."
 kubectl delete pod kafka-check-raw kafka-check-parsed kafka-check-normalized -n umbrella-streaming --ignore-not-found 2>/dev/null || true
 RAW_COUNT=$(kubectl run kafka-check-raw --rm -i --image=apache/kafka:4.1.1 -n umbrella-streaming -- \
@@ -271,7 +197,7 @@ else
     warn "✗ No messages found in raw-messages topic"
 fi
 
-# Check parsed-messages topic (Stage 2 output)
+# Stage 2: parsed-messages topic
 info "Checking parsed-messages topic (Stage 2)..."
 PARSED_COUNT=$(kubectl run kafka-check-parsed --rm -i --image=apache/kafka:4.1.1 -n umbrella-streaming -- \
   /opt/kafka/bin/kafka-get-offsets.sh \
@@ -284,7 +210,7 @@ else
     warn "✗ No messages found in parsed-messages topic"
 fi
 
-# Check normalized-messages topic (Stage 3 output)
+# Stage 3: normalized-messages topic
 info "Checking normalized-messages topic (Stage 3)..."
 NORMALIZED_COUNT=$(kubectl run kafka-check-normalized --rm -i --image=apache/kafka:4.1.1 -n umbrella-streaming -- \
   /opt/kafka/bin/kafka-get-offsets.sh \
@@ -297,14 +223,13 @@ else
     warn "✗ No messages found in normalized-messages topic"
 fi
 
-# Check Elasticsearch (Stage 4 output)
+# Stage 4: Elasticsearch
 info "Checking Elasticsearch (Stage 4)..."
 info "Port-forwarding Elasticsearch..."
 kubectl port-forward -n umbrella-storage svc/elasticsearch 9200:9200 >/dev/null 2>&1 &
 PF_PID=$!
 sleep 5
 
-# Query Elasticsearch
 ES_RESULT=$(curl -s http://localhost:9200/messages-*/_search?q=pipeline-test-001 | jq -r '.hits.total.value // 0' 2>/dev/null || echo "0")
 
 kill $PF_PID 2>/dev/null || true
@@ -315,7 +240,7 @@ else
     warn "✗ No documents found in Elasticsearch"
 fi
 
-# Stage 5: UI backend message search API (deployed in K8s)
+# Stage 5: UI backend message search API
 info "Checking UI backend message search API (Stage 5)..."
 UI_RESULT=0
 
@@ -323,7 +248,6 @@ kubectl port-forward -n umbrella-ui svc/umbrella-ui-backend 8001:8000 >/dev/null
 PF_UI_PID=$!
 sleep 3
 
-# Generate a reviewer JWT using the same secret that's in the K8s secret
 TEST_JWT_SECRET="umbrella-dev-jwt-secret-change-in-production"
 UI_TOKEN=$(uv run --project ui/backend python -c "
 from jose import jwt
@@ -349,7 +273,7 @@ else
     warn "✗ UI API returned no messages (response: $API_RESPONSE)"
 fi
 
-# Stage 6: UI login + auth flow (validates PostgreSQL + RBAC)
+# Stage 6: UI login + auth
 info "Checking UI login flow (Stage 6)..."
 LOGIN_OK=0
 
@@ -380,13 +304,10 @@ fi
 
 kill $PF_UI2_PID 2>/dev/null || true
 
-# Stage 7: Seed fraud policy/rule and create alert for the test document
+# Stage 7: Seed fraud policy/rule and create alert
 info "Seeding fraud policy, rule, and alert (Stage 7)..."
 ALERT_OK=0
 
-# Get the ES document ID and index for the test message so the alert links correctly.
-# Use term on message_id.keyword (exact match) to avoid false positives from
-# tokenisation against older documents that share tokens like "test" or "001".
 EXACT_MSG_ID="<pipeline-test-001@example.com>"
 ES_DOC_ID=""
 ES_INDEX=""
@@ -396,9 +317,6 @@ kubectl port-forward -n umbrella-storage svc/elasticsearch 9200:9200 >/dev/null 
 PF_ES2_PID=$!
 sleep 3
 
-# Poll up to 60 extra seconds for the specific document to be indexed.
-# Stages 1-4 can pass on stale Kafka offset counts; the exact document may
-# take longer than the initial 45s wait to propagate through Logstash.
 info "Waiting for pipeline-test-001 document to appear in Elasticsearch..."
 for attempt in $(seq 1 12); do
     ES_DOC=$(curl -s "http://localhost:9200/messages-*/_search" \
@@ -422,7 +340,6 @@ kill $PF_ES2_PID 2>/dev/null || true
 if [ -z "$ES_DOC_ID" ] || [ -z "$ES_INDEX" ]; then
     warn "✗ pipeline-test-001 document not found in Elasticsearch after 60s extra wait"
 else
-    PG_POD=$(kubectl get pod -n umbrella-storage -l app=postgresql -o jsonpath='{.items[0].metadata.name}')
     kubectl exec -n umbrella-storage "$PG_POD" -- \
       psql -U postgres -d umbrella -c "
 -- Risk model
@@ -446,7 +363,7 @@ VALUES (
   '00000000-0000-0000-0000-000000000001'
 ) ON CONFLICT (id) DO NOTHING;
 
--- Rule
+-- Rule 1: manually-alerted rule (for Stage 8 review flow)
 INSERT INTO policy.rules (id, policy_id, name, description, kql, severity, is_active, created_by)
 VALUES (
   'cccccccc-0000-0000-0000-000000000001',
@@ -459,11 +376,24 @@ VALUES (
   '00000000-0000-0000-0000-000000000001'
 ) ON CONFLICT (id) DO NOTHING;
 
+-- Rule 2: for batch alert generation test (Stage 10) — no manual alert inserted
+INSERT INTO policy.rules (id, policy_id, name, description, kql, severity, is_active, created_by)
+VALUES (
+  'cccccccc-0000-0000-0000-000000000002',
+  'bbbbbbbb-0000-0000-0000-000000000001',
+  'Compliance Keyword Match',
+  'Triggers when the word \"compliance\" appears in a message',
+  'body_text:compliance',
+  'medium',
+  true,
+  '00000000-0000-0000-0000-000000000001'
+) ON CONFLICT (id) DO NOTHING;
+
 -- Alert linked to the test ES document
 -- ON CONFLICT on id: update es_index/es_document_id so re-runs always point to
 -- the current document (not a stale one from a previous pipeline run).
 INSERT INTO alert.alerts (
-  id, name, rule_id, es_index, es_document_id, es_document_ts, severity, status
+  id, name, rule_id, es_index, es_document_id, es_document_ts, severity, status, channel
 ) VALUES (
   'dddddddd-0000-0000-0000-000000000001',
   'Fraud Keyword Match — pipeline-test-001',
@@ -472,11 +402,13 @@ INSERT INTO alert.alerts (
   '$ES_DOC_ID',
   CASE WHEN '$ES_TS' = '' THEN NULL ELSE '$ES_TS'::timestamptz END,
   'high',
-  'open'
+  'open',
+  'email'
 ) ON CONFLICT (id) DO UPDATE SET
   es_index       = EXCLUDED.es_index,
   es_document_id = EXCLUDED.es_document_id,
   es_document_ts = EXCLUDED.es_document_ts,
+  channel        = EXCLUDED.channel,
   status         = 'open';
 
 -- Decision statuses (needed for the review UI)
@@ -488,7 +420,6 @@ VALUES
 ON CONFLICT (id) DO NOTHING;
 "
 
-    # Verify the alert was created
     ALERT_COUNT=$(kubectl exec -n umbrella-storage "$PG_POD" -- \
       psql -U postgres -d umbrella -tAc \
       "SELECT COUNT(*) FROM alert.alerts WHERE id = 'dddddddd-0000-0000-0000-000000000001';")
@@ -502,6 +433,226 @@ ON CONFLICT (id) DO NOTHING;
     fi
 fi
 
+# Stage 8: Alert review E2E
+info "End-to-end alert review flow (Stage 8)..."
+REVIEW_OK=0
+
+if [ "$LOGIN_OK" -eq 1 ] && [ "$ALERT_OK" -eq 1 ]; then
+    kubectl port-forward -n umbrella-ui svc/umbrella-ui-backend 8001:8000 >/dev/null 2>&1 &
+    PF_UI3_PID=$!
+    sleep 3
+
+    ALERT_ID="dddddddd-0000-0000-0000-000000000001"
+    DECISION_STATUS_ID="eeeeeeee-0000-0000-0000-000000000001"  # "Escalate" (non-terminal)
+
+    # 8a. GET alert detail
+    ALERT_DETAIL=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+        "http://localhost:8001/api/v1/alerts/$ALERT_ID")
+    ALERT_NAME=$(echo "$ALERT_DETAIL" | jq -r '.name // empty' 2>/dev/null)
+
+    if [ -n "$ALERT_NAME" ]; then
+        info "  ✓ Fetched alert: $ALERT_NAME"
+    else
+        warn "  ✗ Could not fetch alert detail (response: $ALERT_DETAIL)"
+    fi
+
+    # 8b. POST decision
+    DECISION_RESPONSE=$(curl -s -X POST \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" \
+        "http://localhost:8001/api/v1/alerts/$ALERT_ID/decisions" \
+        -d "{\"status_id\":\"$DECISION_STATUS_ID\",\"comment\":\"E2E pipeline test — escalating for review\"}")
+    DECISION_ID=$(echo "$DECISION_RESPONSE" | jq -r '.id // empty' 2>/dev/null)
+
+    if [ -n "$DECISION_ID" ] && [ "$DECISION_ID" != "null" ]; then
+        info "  ✓ Decision submitted: id=$DECISION_ID"
+    else
+        warn "  ✗ Decision submission failed (response: $DECISION_RESPONSE)"
+    fi
+
+    # 8c. GET audit log
+    if [ -n "$DECISION_ID" ] && [ "$DECISION_ID" != "null" ]; then
+        AUDIT_RESPONSE=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "http://localhost:8001/api/v1/audit-log?alert_id=$ALERT_ID&limit=5")
+        AUDIT_COUNT=$(echo "$AUDIT_RESPONSE" | jq -r '.total // 0' 2>/dev/null || echo "0")
+
+        if [ "$AUDIT_COUNT" -gt 0 ]; then
+            info "  ✓ Audit log contains $AUDIT_COUNT entry(s) for this alert"
+            REVIEW_OK=1
+        else
+            warn "  ✗ Audit log is empty (response: $AUDIT_RESPONSE)"
+        fi
+    fi
+
+    kill $PF_UI3_PID 2>/dev/null || true
+else
+    warn "  ⊘ Skipped — Stage 6 (login) or Stage 7 (alert) did not pass"
+fi
+
+# Stage 9: Entity resolution CRUD
+info "Entity resolution CRUD (Stage 9)..."
+ENTITY_OK=0
+
+if [ "$LOGIN_OK" -eq 1 ]; then
+    kubectl port-forward -n umbrella-ui svc/umbrella-ui-backend 8001:8000 >/dev/null 2>&1 &
+    PF_UI4_PID=$!
+    sleep 3
+
+    # 9a. Create entity (or find existing on re-runs)
+    CREATE_ENTITY_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" \
+        "http://localhost:8001/api/v1/entities" \
+        -d '{
+            "display_name": "Alice (Test Sender)",
+            "entity_type": "person",
+            "handles": [
+                {"handle_type": "email", "handle_value": "alice@example.com", "is_primary": true}
+            ],
+            "attributes": [
+                {"attr_key": "department", "attr_value": "Trading"},
+                {"attr_key": "company", "attr_value": "Example Corp"}
+            ]
+        }')
+    CREATE_HTTP_CODE=$(echo "$CREATE_ENTITY_RESPONSE" | tail -1)
+    CREATE_BODY=$(echo "$CREATE_ENTITY_RESPONSE" | sed '$d')
+    ENTITY_ID=$(echo "$CREATE_BODY" | jq -r '.id // empty' 2>/dev/null)
+
+    if [ -n "$ENTITY_ID" ] && [ "$ENTITY_ID" != "null" ]; then
+        info "  ✓ Entity created: id=$ENTITY_ID"
+    elif [ "$CREATE_HTTP_CODE" = "409" ]; then
+        SEARCH_RESPONSE=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "http://localhost:8001/api/v1/entities?search=Alice")
+        ENTITY_ID=$(echo "$SEARCH_RESPONSE" | jq -r '.items[0].id // empty' 2>/dev/null)
+        if [ -n "$ENTITY_ID" ] && [ "$ENTITY_ID" != "null" ]; then
+            info "  ✓ Entity already exists (re-run): id=$ENTITY_ID"
+        else
+            warn "  ✗ Entity exists (409) but could not find it via search"
+        fi
+    else
+        warn "  ✗ Entity creation failed (response: $CREATE_BODY)"
+    fi
+
+    # 9b. GET entity and verify handles + attributes
+    if [ -n "$ENTITY_ID" ] && [ "$ENTITY_ID" != "null" ]; then
+        GET_ENTITY_RESPONSE=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "http://localhost:8001/api/v1/entities/$ENTITY_ID")
+        HANDLE_COUNT=$(echo "$GET_ENTITY_RESPONSE" | jq -r '.handles | length' 2>/dev/null || echo "0")
+        ATTR_COUNT=$(echo "$GET_ENTITY_RESPONSE" | jq -r '.attributes | length' 2>/dev/null || echo "0")
+
+        if [ "$HANDLE_COUNT" -gt 0 ] && [ "$ATTR_COUNT" -gt 0 ]; then
+            info "  ✓ Entity detail: $HANDLE_COUNT handle(s), $ATTR_COUNT attribute(s)"
+        else
+            warn "  ✗ Entity detail incomplete (handles=$HANDLE_COUNT, attrs=$ATTR_COUNT)"
+        fi
+
+        # 9c. Add a second handle
+        ADD_HANDLE_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            "http://localhost:8001/api/v1/entities/$ENTITY_ID/handles" \
+            -d '{"handle_type": "teams_id", "handle_value": "alice@example.onmicrosoft.com"}')
+        ADD_HTTP_CODE=$(echo "$ADD_HANDLE_RESPONSE" | tail -1)
+        ADD_BODY=$(echo "$ADD_HANDLE_RESPONSE" | sed '$d')
+        HANDLE_ID=$(echo "$ADD_BODY" | jq -r '.id // empty' 2>/dev/null)
+
+        if [ -n "$HANDLE_ID" ] && [ "$HANDLE_ID" != "null" ]; then
+            info "  ✓ Second handle added: id=$HANDLE_ID"
+        elif [ "$ADD_HTTP_CODE" = "409" ]; then
+            info "  ✓ Second handle already exists (re-run)"
+        else
+            warn "  ✗ Add handle failed (response: $ADD_BODY)"
+        fi
+
+        # 9d. List entities
+        LIST_RESPONSE=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "http://localhost:8001/api/v1/entities?search=Alice")
+        LIST_TOTAL=$(echo "$LIST_RESPONSE" | jq -r '.total // 0' 2>/dev/null || echo "0")
+
+        if [ "$LIST_TOTAL" -gt 0 ]; then
+            info "  ✓ Entity list: found $LIST_TOTAL entity(s) matching 'Alice'"
+            ENTITY_OK=1
+        else
+            warn "  ✗ Entity not found in list (response: $LIST_RESPONSE)"
+        fi
+    fi
+
+    kill $PF_UI4_PID 2>/dev/null || true
+else
+    warn "  ⊘ Skipped — Stage 6 (login) did not pass"
+fi
+
+# Stage 10: Batch alert generation
+info "Batch alert generation via API (Stage 10)..."
+GENERATION_OK=0
+
+if [ "$LOGIN_OK" -eq 1 ] && [ "$ALERT_OK" -eq 1 ]; then
+    kubectl port-forward -n umbrella-ui svc/umbrella-ui-backend 8001:8000 >/dev/null 2>&1 &
+    PF_UI5_PID=$!
+    sleep 3
+
+    # Delete any existing alerts for the compliance rule so the generator creates them fresh
+    kubectl exec -n umbrella-storage "$PG_POD" -- \
+      psql -U postgres -d umbrella -c \
+      "DELETE FROM alert.alerts WHERE rule_id = 'cccccccc-0000-0000-0000-000000000002';" 2>/dev/null
+
+    # Create a generation job scoped to the test document only
+    JOB_RESPONSE=$(curl -s -X POST \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" \
+        "http://localhost:8001/api/v1/alert-generation/jobs" \
+        -d '{"scope_type":"all","query_kql":"message_id:pipeline-test-001"}')
+    JOB_ID=$(echo "$JOB_RESPONSE" | jq -r '.id // empty' 2>/dev/null)
+    JOB_STATUS=$(echo "$JOB_RESPONSE" | jq -r '.status // empty' 2>/dev/null)
+
+    if [ -n "$JOB_ID" ] && [ "$JOB_ID" != "null" ]; then
+        info "  ✓ Generation job created: id=$JOB_ID status=$JOB_STATUS"
+    else
+        warn "  ✗ Generation job creation failed (response: $JOB_RESPONSE)"
+    fi
+
+    # Poll until the job completes (max 60s)
+    if [ -n "$JOB_ID" ] && [ "$JOB_ID" != "null" ]; then
+        for attempt in $(seq 1 12); do
+            sleep 5
+            POLL_RESPONSE=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+                "http://localhost:8001/api/v1/alert-generation/jobs/$JOB_ID")
+            JOB_STATUS=$(echo "$POLL_RESPONSE" | jq -r '.status // empty' 2>/dev/null)
+            ALERTS_CREATED=$(echo "$POLL_RESPONSE" | jq -r '.alerts_created // 0' 2>/dev/null)
+            RULES_EVALUATED=$(echo "$POLL_RESPONSE" | jq -r '.rules_evaluated // 0' 2>/dev/null)
+            DOCS_SCANNED=$(echo "$POLL_RESPONSE" | jq -r '.documents_scanned // 0' 2>/dev/null)
+            ERROR_MSG=$(echo "$POLL_RESPONSE" | jq -r '.error_message // empty' 2>/dev/null)
+
+            if [ "$JOB_STATUS" = "completed" ] || [ "$JOB_STATUS" = "failed" ]; then
+                break
+            fi
+            echo -ne "\r  Job status: $JOB_STATUS (attempt $attempt/12)..."
+        done
+        echo ""
+
+        if [ "$JOB_STATUS" = "completed" ]; then
+            info "  ✓ Job completed: rules_evaluated=$RULES_EVALUATED docs_scanned=$DOCS_SCANNED alerts_created=$ALERTS_CREATED"
+            if [ "$ALERTS_CREATED" -gt 0 ]; then
+                info "  ✓ Batch generation created $ALERTS_CREATED alert(s)"
+                GENERATION_OK=1
+            else
+                warn "  ✗ Job completed but created 0 alerts (expected at least 1 for 'Compliance Keyword Match' rule)"
+                warn "  Backend logs (last 30 lines):"
+                kubectl logs -n umbrella-ui -l app=umbrella-ui-backend --tail=30 2>/dev/null || true
+            fi
+        else
+            warn "  ✗ Job ended with status=$JOB_STATUS error=$ERROR_MSG"
+            warn "  Backend logs (last 30 lines):"
+            kubectl logs -n umbrella-ui -l app=umbrella-ui-backend --tail=30 2>/dev/null || true
+        fi
+    fi
+
+    kill $PF_UI5_PID 2>/dev/null || true
+else
+    warn "  ⊘ Skipped — Stage 6 (login) or Stage 7 (alert) did not pass"
+fi
+
+# ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "=========================================="
 echo "Pipeline Test Summary"
@@ -513,13 +664,17 @@ echo "Stage 4 (Logstash → ES):     $([ "$ES_RESULT" -gt 0 ]        && echo '[�
 echo "Stage 5 (UI API search):     $([ "$UI_RESULT" -gt 0 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "Stage 6 (UI login/auth):     $([ "$LOGIN_OK" -eq 1 ]         && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "Stage 7 (Fraud alert):       $([ "$ALERT_OK" -eq 1 ]         && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 8 (Alert review E2E):  $([ "$REVIEW_OK" -eq 1 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 9 (Entity resolution): $([ "$ENTITY_OK" -eq 1 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 10 (Alert generation): $([ "$GENERATION_OK" -eq 1 ]    && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "=========================================="
 echo ""
 
 if [ "$RAW_COUNT" -gt 0 ] && [ "$PARSED_COUNT" -gt 0 ] && \
    [ "$NORMALIZED_COUNT" -gt 0 ] && [ "$ES_RESULT" -gt 0 ] && \
-   [ "$UI_RESULT" -gt 0 ] && [ "$LOGIN_OK" -eq 1 ] && [ "$ALERT_OK" -eq 1 ]; then
-    info "✓ PIPELINE TEST PASSED - All 7 stages working!"
+   [ "$UI_RESULT" -gt 0 ] && [ "$LOGIN_OK" -eq 1 ] && [ "$ALERT_OK" -eq 1 ] && \
+   [ "$REVIEW_OK" -eq 1 ] && [ "$ENTITY_OK" -eq 1 ] && [ "$GENERATION_OK" -eq 1 ]; then
+    info "✓ PIPELINE TEST PASSED - All 10 stages working!"
     echo ""
     info "To access the UI:"
     echo "  kubectl port-forward -n umbrella-ui svc/umbrella-ui-frontend 3000:80"

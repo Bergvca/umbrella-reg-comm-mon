@@ -97,6 +97,16 @@ Manifests live in `deploy/k8s/` organized by namespace:
 
 Kafka topics: `raw-messages`, `parsed-messages`, `normalized-messages`, `processing-results`, `alerts`, `dead-letter`, `normalized-messages-dlq`
 
+## Database Migrations
+
+Migration files live in `infrastructure/postgresql/migrations/` and follow Flyway naming: `V<n>__<description>.sql`.
+
+**When adding a new migration, you must do two things:**
+1. Create the `.sql` file in `infrastructure/postgresql/migrations/`
+2. Add the SQL content as a new key in the ConfigMap in `deploy/k8s/umbrella-storage/postgresql/migration-job.yaml`
+
+The K8s migration Job (Flyway) reads migrations from a ConfigMap volume — it does not read from the filesystem. The ConfigMap is the source of truth for what runs in the cluster.
+
 ## Conventions
 
 - **Structured logging** via `structlog` everywhere — use `structlog.get_logger()`, log with key-value pairs

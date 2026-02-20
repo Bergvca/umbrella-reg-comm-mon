@@ -34,6 +34,8 @@ class Participant(BaseModel):
     id: str = Field(description="Unique identifier for the participant (e.g. email, user ID)")
     name: str = Field(description="Display name")
     role: str = Field(description="Role in the conversation (e.g. sender, recipient, participant)")
+    entity_id: str | None = Field(default=None, description="Resolved entity UUID from entity registry")
+    entity_name: str | None = Field(default=None, description="Resolved entity display name")
 
 
 class Attachment(BaseModel):

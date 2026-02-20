@@ -15,6 +15,8 @@ from .config import IngestionConfig
 from .health import create_health_app
 from .normalizers.email import EmailNormalizer
 from .normalizers.registry import NormalizerRegistry
+from .percolator import AlertPercolator
+from .resolver import EntityResolver
 from .s3 import NormalizedS3Store
 
 logger = structlog.get_logger()
@@ -28,6 +30,20 @@ class IngestionService:
         self._s3 = NormalizedS3Store(config.s3)
         self._registry = NormalizerRegistry()
         self._registry.register(EmailNormalizer(config.monitored_domains))
+
+        self._resolver: EntityResolver | None = None
+        if config.entity.dsn:
+            self._resolver = EntityResolver(
+                dsn=config.entity.dsn,
+                refresh_interval=config.entity.cache_refresh_seconds,
+            )
+
+        self._percolator: AlertPercolator | None = None
+        if config.alert_db.dsn:
+            self._percolator = AlertPercolator(
+                es_config=config.es,
+                alert_db_config=config.alert_db,
+            )
 
         self._consumer: AIOKafkaConsumer | None = None
         self._producer: AIOKafkaProducer | None = None
@@ -87,6 +103,10 @@ class IngestionService:
         )
 
         await self._s3.start()
+        if self._resolver:
+            await self._resolver.start()
+        if self._percolator:
+            await self._percolator.start()
         await self._consumer.start()
         await self._producer.start()
         logger.info("ingestion_service_started")
@@ -100,6 +120,10 @@ class IngestionService:
         finally:
             await self._producer.stop()
             await self._consumer.stop()
+            if self._percolator:
+                await self._percolator.stop()
+            if self._resolver:
+                await self._resolver.stop()
             await self._s3.stop()
             logger.info("ingestion_service_stopped")
 
@@ -134,6 +158,8 @@ class IngestionService:
 
             try:
                 normalized = normalizer.normalize(raw_message)
+                if self._resolver:
+                    normalized = await self._resolver.resolve(normalized)
                 await self._dual_write(normalized)
                 self._messages_processed += 1
                 await self._consumer.commit()
@@ -173,6 +199,25 @@ class IngestionService:
             direction=normalized.direction.value,
             s3_uri=s3_uri,
         )
+
+        # 3. Percolate (real-time alerting) — fail-open
+        if self._percolator:
+            doc = {
+                "message_id": normalized.message_id,
+                "channel": normalized.channel.value,
+                "direction": normalized.direction.value,
+                "timestamp": normalized.timestamp.isoformat(),
+                "body_text": normalized.body_text,
+                "participants": [
+                    {"id": p.id, "name": p.name, "role": p.role}
+                    for p in normalized.participants
+                ],
+                "metadata": normalized.metadata,
+            }
+            es_index = f"messages-{normalized.timestamp:%Y.%m}"
+            await self._percolator.percolate(
+                normalized.message_id, es_index, doc, normalized.timestamp
+            )
 
     # ------------------------------------------------------------------
     # Health server

@@ -29,6 +29,11 @@ async def get_review_session(request: Request) -> AsyncGenerator[AsyncSession, N
         yield session
 
 
+async def get_entity_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
+    async with request.app.state.db.entity_session() as session:
+        yield session
+
+
 async def get_es(request: Request) -> AsyncElasticsearch:
     return request.app.state.es.client
 

@@ -7,9 +7,12 @@ import { AlertsPage } from "@/pages/AlertsPage";
 import { AlertDetailPage } from "@/pages/AlertDetailPage";
 import { QueuesPage } from "@/pages/QueuesPage";
 import { QueueDetailPage } from "@/pages/QueueDetailPage";
+import { BatchReviewPage } from "@/pages/BatchReviewPage";
 import { MessagesPage } from "@/pages/MessagesPage";
 import { MessageDetailPage } from "@/pages/MessageDetailPage";
 import { PoliciesPage } from "@/pages/PoliciesPage";
+import { EntitiesPage } from "@/pages/EntitiesPage";
+import { EntityDetailPage } from "@/pages/EntityDetailPage";
 import { AdminPage } from "@/pages/AdminPage";
 import { AuditPage } from "@/pages/AuditPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
@@ -46,11 +49,16 @@ export function App() {
           <Route path="/alerts/:id" element={<AlertDetailPage />} />
           <Route path="/queues" element={<QueuesPage />} />
           <Route path="/queues/:id" element={<QueueDetailPage />} />
+          <Route path="/queues/:queueId/batches/:batchId/review" element={<BatchReviewPage />} />
 
           {/* Phase 6 routes */}
           <Route path="/messages" element={<MessagesPage />} />
           <Route path="/messages/:index/:docId" element={<MessageDetailPage />} />
           <Route path="/policies" element={<PoliciesPage />} />
+
+          {/* Entity resolution */}
+          <Route path="/entities" element={<EntitiesPage />} />
+          <Route path="/entities/:id" element={<EntityDetailPage />} />
 
           <Route path="/admin" element={<AdminPage />} />
           <Route path="/audit" element={<AuditPage />} />

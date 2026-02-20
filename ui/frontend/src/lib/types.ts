@@ -78,6 +78,8 @@ export interface Participant {
   id: string;
   name: string;
   role: string;
+  entity_id?: string;
+  entity_name?: string;
 }
 
 export interface Attachment {
@@ -296,8 +298,76 @@ export interface GroupDetail extends GroupOut {
 
 export type QueueBatch = BatchOut;
 
+// ── Entities ─────────────────────────────────────────────
+
+export type EntityType = "person" | "organization" | "distribution_list";
+
+export interface HandleOut {
+  id: string;
+  entity_id: string;
+  handle_type: string;
+  handle_value: string;
+  is_primary: boolean;
+  created_at: string;
+}
+
+export interface AttributeOut {
+  id: string;
+  entity_id: string;
+  attr_key: string;
+  attr_value: string;
+  valid_from: string | null;
+  valid_to: string | null;
+  created_at: string;
+}
+
+export interface EntityOut {
+  id: string;
+  display_name: string;
+  entity_type: EntityType;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  handles: HandleOut[];
+  attributes: AttributeOut[];
+}
+
+export interface BatchUploadResult {
+  created: number;
+  updated: number;
+  errors: string[];
+}
+
 // ── User with Roles ────────────────────────────────────
 
 export interface UserWithRoles extends UserOut {
   roles: string[];
+}
+
+// ── Alert Generation ───────────────────────────────────
+
+export type GenerationScopeType = "all" | "policies" | "risk_models";
+export type GenerationJobStatus = "pending" | "running" | "completed" | "failed";
+
+export interface GenerationJobCreate {
+  scope_type: GenerationScopeType;
+  scope_ids?: string[];
+  query_kql?: string | null;
+}
+
+export interface GenerationJobOut {
+  id: string;
+  scope_type: GenerationScopeType;
+  scope_ids: string[] | null;
+  query_kql: string | null;
+  query_kql_resolved: string | null;
+  status: GenerationJobStatus;
+  alerts_created: number;
+  rules_evaluated: number;
+  documents_scanned: number;
+  error_message: string | null;
+  created_by: string;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
 }

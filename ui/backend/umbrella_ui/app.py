@@ -42,10 +42,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
 
+    from umbrella_ui.routers.alert_generation import router as alert_generation_router
     from umbrella_ui.routers.alerts import router as alerts_router
     from umbrella_ui.routers.audit import router as audit_router
     from umbrella_ui.routers.auth import router as auth_router
     from umbrella_ui.routers.decisions import router as decisions_router
+    from umbrella_ui.routers.entities import router as entities_router
     from umbrella_ui.routers.export import router as export_router
     from umbrella_ui.routers.groups import router as groups_router
     from umbrella_ui.routers.messages import router as messages_router
@@ -68,7 +70,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(risk_models_router)
     app.include_router(policies_router)
     app.include_router(rules_router)
+    app.include_router(entities_router)
     app.include_router(export_router)
+    app.include_router(alert_generation_router)
 
     @app.get("/health")
     async def health():

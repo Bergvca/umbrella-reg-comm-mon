@@ -13,7 +13,7 @@ from umbrella_ui.app import create_app
 from umbrella_ui.auth.jwt import create_access_token
 from umbrella_ui.auth.password import hash_password
 from umbrella_ui.config import Settings
-from umbrella_ui.deps import get_alert_session, get_es, get_iam_session, get_policy_session, get_review_session, get_settings
+from umbrella_ui.deps import get_alert_session, get_entity_session, get_es, get_iam_session, get_policy_session, get_review_session, get_settings
 
 
 def _test_settings(**overrides) -> Settings:
@@ -23,6 +23,7 @@ def _test_settings(**overrides) -> Settings:
         "policy_database_url": "sqlite+aiosqlite://",
         "alert_database_url": "sqlite+aiosqlite://",
         "review_database_url": "sqlite+aiosqlite://",
+        "entity_database_url": "sqlite+aiosqlite://",
         "jwt_secret": "test-secret",
     }
     defaults.update(overrides)
@@ -107,6 +108,12 @@ def override_es(app, es_mock):
     def _get_es():
         return es_mock
     app.dependency_overrides[get_es] = _get_es
+
+
+def override_entity_session(app, session):
+    async def _get_session():
+        yield session
+    app.dependency_overrides[get_entity_session] = _get_session
 
 
 def override_policy_session(app, session):

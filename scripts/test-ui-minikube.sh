@@ -9,9 +9,12 @@
 #   ./scripts/test-ui-minikube.sh              # rebuild + redeploy + test
 #   ./scripts/test-ui-minikube.sh --no-build   # redeploy + test (skip image build)
 #   ./scripts/test-ui-minikube.sh --test-only  # test only (skip build + deploy)
+# Re-exec under bash if invoked with sh/dash
+[ -z "$BASH_VERSION" ] && exec bash "$0" "$@"
+
 set -e
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
 echo "=========================================="
@@ -25,9 +28,9 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error() { echo -e "${RED}[ERROR]${NC} $1"; }
+info()  { printf "${GREEN}[INFO]${NC} %s\n" "$1"; }
+warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
+error() { printf "${RED}[ERROR]${NC} %s\n" "$1"; }
 
 # Parse flags
 SKIP_BUILD=false
@@ -77,6 +80,7 @@ if [ "$TEST_ONLY" = false ]; then
     kubectl apply -f deploy/k8s/umbrella-ui/secret.yaml
     kubectl apply -f deploy/k8s/umbrella-ui/backend/
     kubectl apply -f deploy/k8s/umbrella-ui/frontend/
+    kubectl apply -f deploy/k8s/umbrella-ui/ingress.yaml
 
     # Force pod restart to pick up new images
     info "Restarting UI pods..."

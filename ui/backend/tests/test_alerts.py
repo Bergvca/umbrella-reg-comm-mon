@@ -198,25 +198,44 @@ async def test_update_alert_invalid_status(app, client, settings):
 
 @pytest.mark.asyncio
 async def test_alert_stats(app, client, settings):
-    session = make_session_mock()
+    """Stats are aggregated entirely from PostgreSQL."""
+    from datetime import datetime as _dt
+
+    # Mock PG session — returns different rows per query call
+    session = AsyncMock()
+    call_count = 0
+
+    async def _execute(stmt, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        result = MagicMock()
+        if call_count == 1:  # by_severity
+            result.all.return_value = [("high", 5)]
+        elif call_count == 2:  # by_status
+            result.all.return_value = [("open", 4)]
+        elif call_count == 3:  # over_time
+            result.all.return_value = [(_dt(2024, 1, 1), 2)]
+        elif call_count == 4:  # by_channel
+            result.all.return_value = [("email", 3)]
+        else:
+            result.all.return_value = []
+        return result
+
+    session.execute = _execute
     override_alert_session(app, session)
 
     es_mock = AsyncMock()
-    es_mock.search = AsyncMock(return_value={
-        "aggregations": {
-            "by_severity": {"buckets": [{"key": "high", "doc_count": 5}]},
-            "by_channel": {"buckets": [{"key": "email", "doc_count": 3}]},
-            "by_status": {"buckets": [{"key": "open", "doc_count": 4}]},
-            "over_time": {"buckets": [{"key_as_string": "2024-01-01", "doc_count": 2}]},
-        }
-    })
     override_es(app, es_mock)
 
     headers = make_supervisor_headers(settings)
     resp = await client.get("/api/v1/alerts/stats", headers=headers)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["by_severity"][0]["key"] == "high"
+    assert data["by_severity"] == [{"key": "high", "doc_count": 5}]
+    assert data["by_status"] == [{"key": "open", "doc_count": 4}]
+    assert data["by_channel"] == [{"key": "email", "doc_count": 3}]
+    assert len(data["over_time"]) == 1
+    assert data["over_time"][0]["doc_count"] == 2
 
 
 @pytest.mark.asyncio

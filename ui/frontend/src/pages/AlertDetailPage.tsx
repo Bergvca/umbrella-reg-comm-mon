@@ -1,13 +1,12 @@
 import { useParams, Link } from "react-router";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Card, CardContent } from "@/components/ui/card";
-import { AlertMetadataCard } from "@/components/alerts/AlertMetadataCard";
-import { DecisionForm } from "@/components/alerts/DecisionForm";
-import { DecisionTimeline } from "@/components/alerts/DecisionTimeline";
+import { Button } from "@/components/ui/button";
+import { AlertSidePanel } from "@/components/alerts/AlertSidePanel";
 import { MessageDisplay } from "@/components/messages/MessageDisplay";
 import { useAlert } from "@/hooks/useAlerts";
 import { useDecisions } from "@/hooks/useDecisions";
+import { useAlertNavigation } from "@/hooks/useAlertNavigation";
 
 export function AlertDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -21,6 +20,9 @@ export function AlertDetailPage() {
 
   const { data: decisions = [], isLoading: loadingDecisions } =
     useDecisions(alertId);
+
+  const { prevId, nextId, position, total, goToPrev, goToNext } =
+    useAlertNavigation(alertId);
 
   if (loadingAlert) {
     return (
@@ -47,45 +49,71 @@ export function AlertDetailPage() {
     );
   }
 
+  const positionLabel =
+    position != null && total != null ? `${position} of ${total}` : undefined;
+
   return (
-    <div className="p-6 space-y-6 max-w-4xl">
-      <Link to="/alerts" className="text-sm text-muted-foreground hover:text-foreground">
-        ← Back to Alerts
-      </Link>
+    <div className="p-6">
+      {/* Top nav bar */}
+      <div className="flex items-center justify-between mb-6">
+        <Link to="/alerts" className="text-sm text-muted-foreground hover:text-foreground">
+          ← Back to Alerts
+        </Link>
+        {position != null && total != null && (
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!prevId}
+              onClick={goToPrev}
+              title="Previous alert (k / ←)"
+            >
+              ←
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!nextId}
+              onClick={goToNext}
+              title="Next alert (j / →)"
+            >
+              →
+            </Button>
+          </div>
+        )}
+      </div>
 
-      <AlertMetadataCard alert={alert} />
-
-      <Tabs defaultValue="message">
-        <TabsList>
-          <TabsTrigger value="message">Message</TabsTrigger>
-          <TabsTrigger value="decisions">
-            Decisions
-            {!loadingDecisions && decisions.length > 0 && (
-              <span className="ml-1.5 text-xs">({decisions.length})</span>
-            )}
-          </TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="message" className="mt-4">
+      {/* Two-column layout: message left, metadata/decisions right */}
+      <div className="flex gap-6 items-start">
+        {/* Left panel: message content */}
+        <div className="flex-1 min-w-0">
           {alert.message ? (
-            <MessageDisplay message={alert.message} esIndex={alert.es_index} />
+            <Card>
+              <CardContent className="pt-6">
+                <MessageDisplay message={alert.message} esIndex={alert.es_index} />
+              </CardContent>
+            </Card>
           ) : (
-            <p className="text-sm text-muted-foreground">
-              Message not found in Elasticsearch.
-            </p>
+            <Card>
+              <CardContent className="pt-6">
+                <p className="text-sm text-muted-foreground">
+                  Message not found in Elasticsearch.
+                </p>
+              </CardContent>
+            </Card>
           )}
-        </TabsContent>
+        </div>
 
-        <TabsContent value="decisions" className="mt-4">
-          {loadingDecisions ? (
-            <Skeleton className="h-24 w-full" />
-          ) : (
-            <DecisionTimeline decisions={decisions} />
-          )}
-        </TabsContent>
-      </Tabs>
-
-      <DecisionForm alertId={alertId} alertStatus={alert.status} />
+        {/* Right panel: alert metadata, decisions, submit */}
+        <div className="w-80 shrink-0 sticky top-0 max-h-[calc(100vh-7rem)] overflow-y-auto">
+          <AlertSidePanel
+            alert={alert}
+            decisions={decisions}
+            loadingDecisions={loadingDecisions}
+            positionLabel={positionLabel}
+          />
+        </div>
+      </div>
     </div>
   );
 }

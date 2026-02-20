@@ -44,16 +44,116 @@ Recent enforcement actions by the SEC and CFTC have resulted in billions of doll
 
 ## Pipeline Architecture
 
-The system uses a multi-stage message flow to handle data from various sources:
+All communication channels follow the same **three-stage pipeline**. This pattern has been fully implemented for Email and will be replicated for every additional channel.
 
 ```
-Connectors → Kafka(raw-messages) → Processors → Kafka(parsed-messages)
-    → IngestionService → Kafka(normalized-messages) → Logstash → Elasticsearch
+Channel (IMAP, Graph API, SAPI, ...)
+    │
+    ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STAGE 1 — CONNECTOR                                                        │
+│  Poll/stream the external system. Store large payloads in S3 using the      │
+│  claim-check pattern. Publish RawMessage to Kafka `raw-messages`.           │
+└──────────┬───────────────────────────────────────────────────────────────────┘
+           │  RawMessage → S3 (payload) + Kafka `raw-messages` (pointer)
+           ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STAGE 2 — PROCESSOR                                                        │
+│  Consume from `raw-messages`. Download payload from S3. Parse the           │
+│  channel-specific format into structured data. Publish to Kafka             │
+│  `parsed-messages`.                                                          │
+└──────────┬───────────────────────────────────────────────────────────────────┘
+           │  Structured/parsed data → Kafka `parsed-messages`
+           ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STAGE 3 — INGESTION / NORMALIZATION                                        │
+│  Consume from `parsed-messages`. Run the appropriate channel normalizer     │
+│  (via NormalizerRegistry) to produce a NormalizedMessage. Dual-write:       │
+│    • NormalizedMessage → Kafka `normalized-messages`                        │
+│    • NormalizedMessage → S3 archive                                         │
+└──────────┬───────────────────────────────────────────────────────────────────┘
+           │  NormalizedMessage → Kafka `normalized-messages` + S3
+           ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  LOGSTASH → ELASTICSEARCH                                                    │
+│  Logstash consumes `normalized-messages`, transforms, and indexes into ES.  │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-1.  **Connectors** (e.g. `EmailConnector`) poll external systems, store large payloads in S3 (claim-check pattern), and publish `RawMessage` to Kafka `raw-messages`.
-2.  **Processors** (e.g. `EmailProcessor`) consume `raw-messages`, download from S3, parse them, and publish structured data to `parsed-messages`.
-3.  **Ingestion Service** consumes `parsed-messages`, runs channel-specific normalizers to produce `NormalizedMessage`, and dual-writes to Kafka `normalized-messages` + S3.
+### System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                         STAGE 1 — CONNECTORS                                        │
+│                                                                                     │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐    │
+│  │  Teams    │ │  Teams   │ │  Unigy   │ │Bloomberg │ │Bloomberg │ │  Email   │    │
+│  │  Chat     │ │  Calls   │ │  Turret  │ │  Chat    │ │  Email   │ │  (IMAP)  │    │
+│  │ Connector │ │ Connector│ │ Connector│ │ Connector│ │ Connector│ │ Connector │    │
+│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘    │
+│       └─────────────┴────────────┴──────┬──────┴─────────────┴────────────┘          │
+│                              ┌──────────┴──────────┐                                 │
+│                              │   BaseConnector      │   Shared framework:             │
+│                              │   Framework          │   Kafka, S3, health,            │
+│                              │                      │   DLQ, retry, TaskGroup         │
+│                              └──────────┬───────────┘                                │
+└─────────────────────────────────────────┼────────────────────────────────────────────┘
+                                          │ → S3 (payload) + Kafka `raw-messages`
+                                          ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                         STAGE 2 — PROCESSORS                                        │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐               │
+│  │  Email        │ │  Teams Chat  │ │  Teams Call   │ │  Bloomberg   │               │
+│  │  Processor    │ │  Processor   │ │  Processor    │ │  Processor   │               │
+│  └──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └──────┬───────┘               │
+│         └────────────────┴────────────────┴────────────────┘                         │
+└────────────────────────────────────┼─────────────────────────────────────────────────┘
+                                     │ → Kafka `parsed-messages`
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                         STAGE 3 — INGESTION / NORMALIZATION                         │
+│  ┌─────────────────────┐    ┌──────────────────────┐                                │
+│  │  IngestionService    │───▶│  NormalizerRegistry   │                                │
+│  │  (Kafka consumer)    │    │  EmailNormalizer      │                                │
+│  │                      │    │  TeamsNormalizer      │                                │
+│  │                      │    │  BloombergNormalizer  │                                │
+│  │                      │    │  TurretNormalizer     │                                │
+│  └──────────┬───────────┘    └────────────────────────┘                                │
+└─────────────┼────────────────────────────────────────────────────────────────────────┘
+              │ → Kafka `normalized-messages` + S3
+              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                         LOGSTASH + ELASTICSEARCH                                    │
+│  ┌──────────────────┐        ┌──────────────────────────────────────────────────┐   │
+│  │  Logstash         │──────▶│  Elasticsearch Cluster                           │   │
+│  │  (Kafka consumer, │       │  indices: messages-*, alerts-*, audit-*          │   │
+│  │   transforms,     │       └──────────────────────────────────────────────────┘   │
+│  │   index to ES)    │                                                              │
+│  └──────────────────┘                                                               │
+└──────────────────────────────────┬──────────────────────────────────────────────────┘
+                                   │
+                   ┌───────────────┼───────────────┐
+                   ▼               │               ▼
+┌──────────────────────────────┐   │  ┌───────────────────────────────────────────────┐
+│         PostgreSQL            │   │  │                 UI LAYER                      │
+│  users, policies, alerts,     │   │  │  UI Backend (FastAPI) + Frontend (React)     │
+│  entities, review queues,     │   │  └───────────┬───────────────────────────────────┘
+│  audit log                    │   │              │
+└──────────────────────────────┘   │              ▼
+                                   ▼
+                   ┌──────────────────────────────────────────────────────────────────┐
+                   │         ANALYTICS & AI LAYER  (planned)                          │
+                   │                                                                  │
+                   │  • RAG Search — semantic search over all comms via vector        │
+                   │    embeddings, natural-language queries, cross-channel retrieval  │
+                   │  • Agentic Review — AI agents auto-review flagged alerts, draft  │
+                   │    dispositions with cited evidence, configurable autonomy       │
+                   │  • Agent Context Enrichment — pre-build rich context packages    │
+                   │    for reviewers (related comms, entity history, prior decisions)│
+                   │  • Workflow Orchestrator — multi-step review workflows with      │
+                   │    tool-calling LLM agents and full audit trail                  │
+                   └──────────────────────────────────────────────────────────────────┘
+```
 
 ## Project Structure
 
@@ -148,3 +248,35 @@ Kubernetes manifests are organized by namespace in `deploy/k8s/`:
 - `umbrella-storage`: Elasticsearch, Logstash, MinIO
 - `umbrella-connectors`: Connector and Processor deployments
 - `umbrella-ingestion`: Ingestion Service
+
+## Screenshots
+
+### Dashboard
+![Dashboard](docs/screenshots/ss_dashboard.png)
+
+### Alerts
+![Alerts](docs/screenshots/ss_alerts.png)
+
+### Message Search
+![Message Search](docs/screenshots/ss_search.png)
+
+### Message Review
+![Message Review](docs/screenshots/ss_message_review.png)
+
+### Review Queues
+![Review Queues](docs/screenshots/ss_review_queues.png)
+
+### Entities
+![Entities](docs/screenshots/ss_entities.png)
+
+### Entity Detail
+![Entity Detail](docs/screenshots/ss_single_entity.png)
+
+### Policies
+![Policies](docs/screenshots/ss_policies.png)
+
+### RBAC
+![RBAC](docs/screenshots/ss_rbac.png)
+
+### Audit Log
+![Audit Log](docs/screenshots/ss_audit_log.png)

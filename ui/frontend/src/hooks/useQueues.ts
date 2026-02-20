@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getQueues, getQueue, getBatches, getBatchItems, getMyQueue, createQueue, createBatch, updateBatch, addItemToBatch } from "@/api/queues";
+import { getQueues, getQueue, getBatches, getBatchItems, getBatchAlerts, getMyQueue, createQueue, createBatch, generateBatches, updateBatch, addItemToBatch } from "@/api/queues";
 
 export function useQueues(params: { offset?: number; limit?: number } = {}) {
   return useQuery({
@@ -45,6 +45,25 @@ export function useCreateQueue() {
   return useMutation({
     mutationFn: createQueue,
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ["queues"] }); },
+  });
+}
+
+export function useBatchAlerts(queueId: string, batchId: string) {
+  return useQuery({
+    queryKey: ["queues", queueId, "batches", batchId, "alerts"],
+    queryFn: () => getBatchAlerts(queueId, batchId),
+    enabled: !!queueId && !!batchId,
+  });
+}
+
+export function useGenerateBatches(queueId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => generateBatches(queueId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["queues", queueId] });
+      void qc.invalidateQueries({ queryKey: ["queues", queueId, "batches"] });
+    },
   });
 }
 

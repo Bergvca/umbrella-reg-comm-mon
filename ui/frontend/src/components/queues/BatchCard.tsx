@@ -42,7 +42,7 @@ export function BatchCard({ batch }: Props) {
             variant="outline"
             size="sm"
             onClick={() =>
-              void navigate(`/queues/${batch.queue_id}?batch=${batch.id}`)
+              void navigate(`/queues/${batch.queue_id}/batches/${batch.id}/review?index=0`)
             }
           >
             Review Batch →

@@ -2,7 +2,7 @@
 
 Database: `umbrella`
 
-Four schemas by domain:
+Five schemas by domain:
 
 | Schema | Purpose |
 |---|---|
@@ -10,6 +10,7 @@ Four schemas by domain:
 | `policy` | Risk models, policies, KQL rules |
 | `alert` | Alerts linked to Elasticsearch events |
 | `review` | Decisions, statuses, review queues, audit trail |
+| `entity` | Entity resolution — people, organizations, handles, attributes |
 
 Migrations live in `infrastructure/postgresql/migrations/` (Flyway V-versioned).
 
@@ -269,6 +270,58 @@ Indexes: `(decision_id)`, `(actor_id)`, `(occurred_at DESC)`
 
 ---
 
+## Schema: `entity`
+
+### `entity.entities`
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | uuid | PK, default `gen_random_uuid()` |
+| `display_name` | text | NOT NULL |
+| `entity_type` | text | NOT NULL — `'person'`, `'organization'`, `'distribution_list'` |
+| `created_at` | timestamptz | NOT NULL DEFAULT now() |
+| `updated_at` | timestamptz | NOT NULL DEFAULT now() |
+| `created_by` | uuid | FK → `iam.users.id` |
+
+Unique: `(display_name, entity_type)` · Indexes: `(entity_type)`
+
+### `entity.handles`
+
+Maps channel-specific identifiers to entities.
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | uuid | PK, default `gen_random_uuid()` |
+| `entity_id` | uuid | NOT NULL, FK → `entity.entities.id` ON DELETE CASCADE |
+| `handle_type` | text | NOT NULL — `'email'`, `'teams_id'`, `'bloomberg_uuid'`, `'turret_extension'` |
+| `handle_value` | text | NOT NULL — normalized (lowercased for email) |
+| `is_primary` | boolean | NOT NULL DEFAULT false |
+| `created_at` | timestamptz | NOT NULL DEFAULT now() |
+
+Unique: `(handle_type, handle_value)` — one handle maps to exactly one entity
+
+Indexes: `(entity_id)`
+
+### `entity.attributes`
+
+Extensible key-value pairs with optional temporal validity.
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | uuid | PK, default `gen_random_uuid()` |
+| `entity_id` | uuid | NOT NULL, FK → `entity.entities.id` ON DELETE CASCADE |
+| `attr_key` | text | NOT NULL — e.g. `'company'`, `'department'`, `'title'` |
+| `attr_value` | text | NOT NULL |
+| `valid_from` | timestamptz | optional temporal validity |
+| `valid_to` | timestamptz | optional temporal validity |
+| `created_at` | timestamptz | NOT NULL DEFAULT now() |
+
+Unique: `(entity_id, attr_key, valid_from)` — one value per key per time period
+
+Indexes: `(entity_id)`
+
+---
+
 ## Database Roles
 
 | Role | Schema access |
@@ -277,8 +330,9 @@ Indexes: `(decision_id)`, `(actor_id)`, `(occurred_at DESC)`
 | `policy_rw` | Read/write `policy`; read `iam` |
 | `alert_rw` | Read/write `alert`; read `iam`, `policy` |
 | `review_rw` | Read/write `review`; read `iam`, `policy`, `alert` |
+| `entity_rw` | Read/write `entity`; read `iam` |
 
-Connection strings are injected via the `postgresql-credentials` Secret as `IAM_DATABASE_URL`, `POLICY_DATABASE_URL`, `ALERT_DATABASE_URL`, `REVIEW_DATABASE_URL`.
+Connection strings are injected via the `postgresql-credentials` Secret as `IAM_DATABASE_URL`, `POLICY_DATABASE_URL`, `ALERT_DATABASE_URL`, `REVIEW_DATABASE_URL`, `ENTITY_DATABASE_URL`.
 
 ---
 
@@ -308,3 +362,6 @@ Connection strings are injected via the `postgresql-credentials` Secret as `IAM_
 | `review.decisions.status_id` | `review.decision_statuses.id` |
 | `review.audit_log.decision_id` | `review.decisions.id` |
 | `review.audit_log.actor_id` | `iam.users.id` |
+| `entity.entities.created_by` | `iam.users.id` |
+| `entity.handles.entity_id` | `entity.entities.id` |
+| `entity.attributes.entity_id` | `entity.entities.id` |

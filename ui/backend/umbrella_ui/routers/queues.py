@@ -12,8 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from umbrella_ui.auth.rbac import require_role
 from umbrella_ui.db.models.alert import Alert
+from umbrella_ui.db.models.policy import Rule
 from umbrella_ui.db.models.review import Queue, QueueBatch, QueueItem
 from umbrella_ui.deps import get_review_session
+from umbrella_ui.schemas.alert import AlertOut
 from umbrella_ui.schemas.common import PaginatedResponse
 from umbrella_ui.schemas.review import (
     BatchAssign,
@@ -182,6 +184,128 @@ async def create_batch(
     await session.commit()
     await session.refresh(batch)
     return _batch_out(batch)
+
+
+@router.post(
+    "/queues/{queue_id}/generate-batches",
+    response_model=list[BatchOut],
+    status_code=status.HTTP_201_CREATED,
+)
+async def generate_batches(
+    queue_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_review_session)],
+    _user: Annotated[dict, Depends(require_role("supervisor"))],
+):
+    """Auto-generate batches of 50 alerts for all eligible open alerts."""
+    queue = (
+        await session.execute(select(Queue).where(Queue.id == queue_id))
+    ).scalar_one_or_none()
+    if queue is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Queue not found")
+
+    # Count existing batches to determine starting batch number
+    existing_count = (
+        await session.execute(
+            select(func.count())
+            .select_from(QueueBatch)
+            .where(QueueBatch.queue_id == queue_id)
+        )
+    ).scalar_one()
+
+    # Get IDs of alerts already in any batch of this queue
+    already_batched = (
+        select(QueueItem.alert_id)
+        .join(QueueBatch, QueueItem.batch_id == QueueBatch.id)
+        .where(QueueBatch.queue_id == queue_id)
+    ).subquery()
+
+    # Query all open alerts whose rule belongs to the queue's policy,
+    # excluding alerts already in a batch
+    eligible_stmt = (
+        select(Alert)
+        .join(Rule, Alert.rule_id == Rule.id)
+        .where(
+            Alert.status == "open",
+            Rule.policy_id == queue.policy_id,
+            Alert.id.notin_(select(already_batched.c.alert_id)),
+        )
+        .order_by(Alert.created_at)
+    )
+    eligible_alerts = (await session.execute(eligible_stmt)).scalars().all()
+
+    if not eligible_alerts:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No eligible alerts found",
+        )
+
+    # Chunk into groups of 50 and create batches
+    batch_size = 50
+    created_batches: list[BatchOut] = []
+    for i in range(0, len(eligible_alerts), batch_size):
+        chunk = eligible_alerts[i : i + batch_size]
+        batch_number = existing_count + len(created_batches) + 1
+        batch_name = f"{queue.name}-{batch_number:06d}"
+
+        batch = QueueBatch(queue_id=queue_id, name=batch_name)
+        session.add(batch)
+        await session.flush()
+
+        for pos, alert in enumerate(chunk):
+            item = QueueItem(batch_id=batch.id, alert_id=alert.id, position=pos)
+            session.add(item)
+
+        created_batches.append(_batch_out(batch, len(chunk)))
+
+    await session.commit()
+    return created_batches
+
+
+@router.get(
+    "/queues/{queue_id}/batches/{batch_id}/alerts",
+    response_model=list[AlertOut],
+)
+async def list_batch_alerts(
+    queue_id: uuid.UUID,
+    batch_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_review_session)],
+    _user: Annotated[dict, Depends(require_role("reviewer"))],
+):
+    """Return full alert data for items in a batch, ordered by position."""
+    batch = (
+        await session.execute(
+            select(QueueBatch).where(
+                QueueBatch.id == batch_id, QueueBatch.queue_id == queue_id
+            )
+        )
+    ).scalar_one_or_none()
+    if batch is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Batch not found")
+
+    stmt = (
+        select(Alert, Rule.name.label("rule_name"))
+        .join(QueueItem, QueueItem.alert_id == Alert.id)
+        .join(Rule, Alert.rule_id == Rule.id)
+        .where(QueueItem.batch_id == batch_id)
+        .order_by(QueueItem.position)
+    )
+    rows = (await session.execute(stmt)).all()
+
+    return [
+        AlertOut(
+            id=alert.id,
+            name=alert.name,
+            rule_id=alert.rule_id,
+            es_index=alert.es_index,
+            es_document_id=alert.es_document_id,
+            es_document_ts=alert.es_document_ts,
+            severity=alert.severity,
+            status=alert.status,
+            created_at=alert.created_at,
+            rule_name=rule_name,
+        )
+        for alert, rule_name in rows
+    ]
 
 
 @router.patch("/queues/{queue_id}/batches/{batch_id}", response_model=BatchOut)
