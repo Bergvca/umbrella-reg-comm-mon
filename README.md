@@ -1,4 +1,4 @@
-# Umbrella — Regulatory Communications Monitoring Platform
+# Umbrella — AI-Powered Behavioral Analytics Platform
 
 ```
                                   .
@@ -19,38 +19,75 @@
              ╱  ╱  ╱  ╱         │         ╲  ╲  ╲  ╲
            ╱  ╱  ╱  ╱    ┌─────┴─────┐     ╲  ╲  ╲  ╲
          ╱  ╱  ╱  ╱      │ PROTECTED │       ╲  ╲  ╲  ╲
-       ╱  ╱  ╱  ╱        │  comms    │         ╲  ╲  ╲  ╲
+       ╱  ╱  ╱  ╱        │   data    │         ╲  ╲  ╲  ╲
      ╱  ╱  ╱  ╱          └───────────┘           ╲  ╲  ╲  ╲
 ```
 
 ## Overview
 
-Umbrella is a regulatory communications monitoring platform designed to capture, normalize, process, and surface electronic communications (eComm) and audio communications (aComm) for compliance review. The platform ingests data from multiple communication channels, applies NLP and transcription pipelines, and presents flagged alerts to compliance reviewers through a custom UI.
+Umbrella is a **behavioral analytics platform** that ingests data from diverse sources, normalizes it into a unified schema, and applies **AI-powered analysis** to surface insights, anomalies, and alerts. The platform is built around a flexible **agent builder** — powered by LangChain — that lets users create custom AI agents to query Elasticsearch and PostgreSQL, enabling deep analytical workflows without writing code.
 
-The system follows a **microservices architecture** deployed on **Kubernetes**, ensuring each component can be developed, scaled, and deployed independently.
+While the data ingestion pipeline is domain-agnostic, Umbrella ships with purpose-built use cases including:
 
-## Regulatory Context & Compliance
+- **Regulatory Communications Monitoring** — eComm/aComm capture and compliance review for financial institutions
+- **Trade Surveillance** — detecting market abuse, insider trading, and suspicious trading patterns
+- **Social Media Monitoring** — tracking brand sentiment, misinformation, and behavioral signals across platforms
+- **Call Centre Analytics** — analyzing customer interactions for quality, compliance, and behavioral trends
+- **Internal Communications Monitoring** — detecting policy violations, data leakage, and conduct risk
 
-Umbrella is built to help financial institutions meet stringent recordkeeping and supervision requirements mandated by global regulators. For banks, broker-dealers, and investment advisers, maintaining a comprehensive and searchable archive of all business communications is not optional—it is a legal necessity.
+## AI Analytics Layer
 
-### Key Regulations
-*   **SEC Rule 17a-4**: Requires broker-dealers to preserve "all business-related communications" in a non-rewriteable, non-erasable (WORM) format for a minimum of 3 to 6 years.
-*   **CFTC Regulation 1.31**: Mandates that swap dealers, futures commission merchants, and other registrants keep full records of all oral and written communications that lead to a trade.
-*   **Federal Reserve (FED)**: Expects robust internal controls and monitoring systems to detect market abuse, insider trading, and misconduct as part of safe and sound banking practices (e.g., SR 13-19).
-*   **FINRA Rule 3110**: Specifically requires firms to have a system to supervise the activities of each associated person, including the review of electronic communications.
-*   **MiFID II (EU)**: Article 16(7) requires investment firms to record all telephone conversations and electronic communications relating to transactions concluded when dealing on own account and the provision of client order services.
-*   **Market Abuse Regulation (MAR)**: Mandates that firms have effective arrangements, systems, and procedures to detect and report suspicious orders and transactions to prevent market manipulation.
-*   **FCA (UK)**: The Financial Conduct Authority requires comprehensive recording and monitoring of relevant conversations (COBS 11.8) to protect consumers and maintain market integrity.
+The core differentiator is Umbrella's **AI analytics layer**. It combines general-purpose analytics pipelines with LangChain-powered AI agents. It provides:
 
-### The "Off-Channel" Challenge
-Recent enforcement actions by the SEC and CFTC have resulted in billions of dollars in fines for firms failing to capture "off-channel" communications (such as WhatsApp, Signal, or personal SMS). Umbrella addresses this by providing a unified connector framework that can ingest data from any source, ensuring that all business conduct—regardless of the platform—is captured, indexed, and supervised.
+### General Analytics
+
+Pipelines that run automatically on ingested data:
+
+- **Deduplication** — detects and collapses duplicate messages across sources using content fingerprinting and fuzzy matching
+- **Email threading** — reconstructs conversation threads from `In-Reply-To` / `References` headers and subject-line heuristics
+- **Outlier detection** — statistical and ML-based flagging of anomalous behavior (volume spikes, unusual communication patterns, off-hours activity)
+- **Entity resolution** — links mentions of people, organizations, and accounts across sources into unified entity profiles
+- **Audio transcription & diarization** — speech-to-text via Whisper with speaker diarization, producing searchable transcripts from calls, voicemails, and recordings
+- **NLP enrichment** — lexicon matching, named entity recognition, sentiment analysis, language detection and translation
+
+### Agent Builder (UI)
+
+The UI includes a no-code/low-code **agent builder** for creating and managing custom AI agents. Users configure agents through the dashboard, and the AI layer executes them. Each agent is configured with:
+
+- **Model** — any LLM backend: cloud APIs (OpenAI, Anthropic, Google, etc.), self-hosted open-source models (Llama, Mistral, etc. via vLLM/Ollama), or private fine-tuned models — swap with a single config change
+- **Data sources** — which Elasticsearch indices and/or PostgreSQL tables the agent can query
+- **Tools** — pre-built tool catalog (ES full-text search, ES aggregations, SQL queries, entity lookups, time-series analysis) plus custom tool definitions
+- **Instructions** — natural language system prompts defining the agent's role, goals, and constraints
+- **Output schema** — structured output definitions for alerts, reports, or disposition recommendations
+
+Agent configurations are stored in PostgreSQL and executed by the AI analytics layer at runtime.
+
+### Pre-built Agents
+
+Umbrella ships with ready-to-use agents for common use cases:
+
+| Agent | Description |
+|---|---|
+| **Comms Reviewer** | Reviews flagged communications, drafts dispositions with cited evidence |
+| **Trade Surveillance** | Correlates trade data with communications to detect suspicious patterns |
+| **Entity Risk Profiler** | Builds behavioral risk profiles by aggregating activity across data sources |
+| **Anomaly Detector** | Identifies statistical outliers and behavioral deviations in time-series data |
+| **Semantic Search** | RAG-powered natural language search across all indexed data |
+
+### Agent Capabilities
+
+- **Elasticsearch queries** — full-text search, aggregations, percolator alerts, vector similarity
+- **PostgreSQL queries** — structured data lookups, entity resolution, audit trails, policy configurations
+- **Cross-source correlation** — join insights from ES and Postgres in a single analytical chain
+- **Context enrichment** — agents can call other agents, building rich context packages for human reviewers
+- **Audit trail** — every agent action, query, and decision is logged for full traceability
 
 ## Pipeline Architecture
 
-All communication channels follow the same **three-stage pipeline**. This pattern has been fully implemented for Email and will be replicated for every additional channel.
+All data sources follow the same **three-stage ingestion pipeline**:
 
 ```
-Channel (IMAP, Graph API, SAPI, ...)
+Data Source (IMAP, API, Stream, File, ...)
     │
     ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -63,14 +100,14 @@ Channel (IMAP, Graph API, SAPI, ...)
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  STAGE 2 — PROCESSOR                                                        │
 │  Consume from `raw-messages`. Download payload from S3. Parse the           │
-│  channel-specific format into structured data. Publish to Kafka             │
+│  source-specific format into structured data. Publish to Kafka              │
 │  `parsed-messages`.                                                          │
 └──────────┬───────────────────────────────────────────────────────────────────┘
            │  Structured/parsed data → Kafka `parsed-messages`
            ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  STAGE 3 — INGESTION / NORMALIZATION                                        │
-│  Consume from `parsed-messages`. Run the appropriate channel normalizer     │
+│  Consume from `parsed-messages`. Run the appropriate normalizer             │
 │  (via NormalizerRegistry) to produce a NormalizedMessage. Dual-write:       │
 │    • NormalizedMessage → Kafka `normalized-messages`                        │
 │    • NormalizedMessage → S3 archive                                         │
@@ -90,9 +127,9 @@ Channel (IMAP, Graph API, SAPI, ...)
 │                         STAGE 1 — CONNECTORS                                        │
 │                                                                                     │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐    │
-│  │  Teams    │ │  Teams   │ │  Unigy   │ │Bloomberg │ │Bloomberg │ │  Email   │    │
-│  │  Chat     │ │  Calls   │ │  Turret  │ │  Chat    │ │  Email   │ │  (IMAP)  │    │
-│  │ Connector │ │ Connector│ │ Connector│ │ Connector│ │ Connector│ │ Connector │    │
+│  │  Email    │ │  Teams   │ │  Trade   │ │  Social  │ │  Call    │ │  Custom  │    │
+│  │  (IMAP)  │ │  Chat    │ │  Feed    │ │  Media   │ │  Centre  │ │  Source  │    │
+│  │ Connector│ │ Connector│ │ Connector│ │ Connector│ │ Connector│ │ Connector│    │
 │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘    │
 │       └─────────────┴────────────┴──────┬──────┴─────────────┴────────────┘          │
 │                              ┌──────────┴──────────┐                                 │
@@ -104,9 +141,9 @@ Channel (IMAP, Graph API, SAPI, ...)
                                           │ → S3 (payload) + Kafka `raw-messages`
                                           ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                         STAGE 2 — PROCESSORS                                        │
+│                     STAGE 2 — PROCESSORS                                            │
 │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐               │
-│  │  Email        │ │  Teams Chat  │ │  Teams Call   │ │  Bloomberg   │               │
+│  │  Email        │ │  Teams Chat  │ │  Trade Feed   │ │  Social      │               │
 │  │  Processor    │ │  Processor   │ │  Processor    │ │  Processor   │               │
 │  └──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └──────┬───────┘               │
 │         └────────────────┴────────────────┴────────────────┘                         │
@@ -114,19 +151,19 @@ Channel (IMAP, Graph API, SAPI, ...)
                                      │ → Kafka `parsed-messages`
                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                         STAGE 3 — INGESTION / NORMALIZATION                         │
+│                     STAGE 3 — INGESTION / NORMALIZATION                             │
 │  ┌─────────────────────┐    ┌──────────────────────┐                                │
 │  │  IngestionService    │───▶│  NormalizerRegistry   │                                │
 │  │  (Kafka consumer)    │    │  EmailNormalizer      │                                │
-│  │                      │    │  TeamsNormalizer      │                                │
-│  │                      │    │  BloombergNormalizer  │                                │
-│  │                      │    │  TurretNormalizer     │                                │
+│  │                      │    │  TradeNormalizer      │                                │
+│  │                      │    │  SocialNormalizer     │                                │
+│  │                      │    │  ...                  │                                │
 │  └──────────┬───────────┘    └────────────────────────┘                                │
 └─────────────┼────────────────────────────────────────────────────────────────────────┘
               │ → Kafka `normalized-messages` + S3
               ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                         LOGSTASH + ELASTICSEARCH                                    │
+│                     LOGSTASH + ELASTICSEARCH                                        │
 │  ┌──────────────────┐        ┌──────────────────────────────────────────────────┐   │
 │  │  Logstash         │──────▶│  Elasticsearch Cluster                           │   │
 │  │  (Kafka consumer, │       │  indices: messages-*, alerts-*, audit-*          │   │
@@ -140,58 +177,74 @@ Channel (IMAP, Graph API, SAPI, ...)
 ┌──────────────────────────────┐   │  ┌───────────────────────────────────────────────┐
 │         PostgreSQL            │   │  │                 UI LAYER                      │
 │  users, policies, alerts,     │   │  │  UI Backend (FastAPI) + Frontend (React)     │
-│  entities, review queues,     │   │  └───────────┬───────────────────────────────────┘
-│  audit log                    │   │              │
-└──────────────────────────────┘   │              ▼
-                                   ▼
-                   ┌──────────────────────────────────────────────────────────────────┐
-                   │         ANALYTICS & AI LAYER  (planned)                          │
-                   │                                                                  │
-                   │  • RAG Search — semantic search over all comms via vector        │
-                   │    embeddings, natural-language queries, cross-channel retrieval  │
-                   │  • Agentic Review — AI agents auto-review flagged alerts, draft  │
-                   │    dispositions with cited evidence, configurable autonomy       │
-                   │  • Agent Context Enrichment — pre-build rich context packages    │
-                   │    for reviewers (related comms, entity history, prior decisions)│
-                   │  • Workflow Orchestrator — multi-step review workflows with      │
-                   │    tool-calling LLM agents and full audit trail                  │
+│  entities, review queues,     │   │  │                                               │
+│  agent configs, audit log     │   │  │  ┌─────────────────────────────────────────┐ │
+└──────────┬───────────────────┘   │  │  │  Agent Builder (no-code config UI)      │ │
+           │                       │  │  │  Create, edit, test agents from the UI   │ │
+           │                       │  │  └─────────────────┬───────────────────────┘ │
+           │                       │  └───────────────────┬┼──────────────────────────┘
+           │                       ▼                      ││
+           │       ┌──────────────────────────────────────────────────────────────────┐
+           │       │         AI ANALYTICS LAYER                            ▲          │
+           │       │                                          agent configs│          │
+           └──────▶│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐             │
+                   │  │ Agent        │  │ Pre-built   │  │ Tool        │             │
+                   │  │ Runtime      │  │ Agents      │  │ Catalog     │             │
+                   │  │ (LangChain   │  │ (comms,     │  │ (ES search, │             │
+                   │  │  execution)  │  │  trade,     │  │  SQL query, │             │
+                   │  │              │  │  anomaly)   │  │  entity     │             │
+                   │  └──────────────┘  └─────────────┘  │  lookup)    │             │
+                   │                                      └─────────────┘             │
+                   │  Queries: Elasticsearch ◀──────────────────────────────────────▶ │
+                   │  Queries: PostgreSQL    ◀──────────────────────────────────────▶ │
                    └──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Project Structure
 
-- `connectors/`: Channel-specific connectors and the shared framework.
+- `connectors/`: Data source connectors and the shared framework.
   - `connector-framework/`: Base classes and shared schema (`umbrella-connector-framework`).
   - `email/`: IMAP/SMTP connector implementation.
-  - `teams-chat/`, `teams-calls/`, `bloomberg-chat/`, etc.: Future connector implementations.
+  - Additional connectors for other data sources (trade feeds, social media, etc.).
 - `ingestion-api/`: Centralized service for normalization and dual-writing.
 - `processing/`: Services for enrichment (Transcription, Translation, NLP).
-- `ui/`: Compliance review dashboard (Frontend & Backend).
+- `agents/`: LangChain agent runtime, tool definitions, and pre-built agent configs.
+- `ui/`: Analytics dashboard + agent builder UI (Frontend & Backend).
 - `infrastructure/`: Deployment configurations for Kafka, Elasticsearch, PostgreSQL, etc.
-- `deploy/`: Kubernetes manifests and Helm charts.
-- `scripts/`: Utility scripts for development and testing.
+- `deploy/`: Kubernetes manifests.
 
 ## Key Components
 
 ### Connector Layer
-Standalone microservices responsible for interfacing with communication channels. They use a common framework for health checks, retries, and dead-letter routing.
+Standalone microservices responsible for interfacing with data sources. They use a common framework for health checks, retries, and dead-letter routing.
 
 ### Ingestion API
-A centralized gateway that normalizes incoming parsed messages into a unified schema and persists them to both Kafka and S3.
+A centralized gateway that normalizes incoming parsed data into a unified schema and persists it to both Kafka and S3.
 
 ### Processing Layer
-- **Transcription Service**: Converts audio (calls) to text with speaker diarization.
+- **Transcription Service**: Converts audio to text with speaker diarization.
 - **Translation Service**: Detects languages and translates content to English.
 - **NLP Service**: Performs lexicon matching, entity recognition, sentiment analysis, and alert generation.
 
+### AI Analytics Layer
+- **General Analytics**: Deduplication, email threading, outlier detection, entity resolution, and NLP enrichment pipelines that run automatically on ingested data.
+- **Audio Transcription**: Whisper-based speech-to-text with speaker diarization for calls, voicemails, and recordings.
+- **Agent Runtime**: LangChain/LangGraph execution engine — loads agent configs from PostgreSQL, runs them with memory, tool calling, and structured output.
+- **Tool Catalog**: Pre-built tools for Elasticsearch queries (full-text, aggregations, vector search) and PostgreSQL queries (SQL, entity resolution).
+- **Audit Trail**: Every agent query, reasoning step, and output is logged.
+
+### UI Layer
+- **Dashboard**: React frontend + FastAPI backend for data exploration, alerts, and review workflows.
+- **Agent Builder**: No-code UI for creating, editing, and testing custom AI agents. Configs are stored in PostgreSQL and executed by the AI analytics layer.
+
 ### Search & Storage
-- **Elasticsearch**: Full-text search and indexing of enriched messages and alerts.
-- **PostgreSQL**: Stores application state, users, cases, and policy configurations.
+- **Elasticsearch**: Full-text search and indexing of all ingested data and alerts.
+- **PostgreSQL**: Application state — users, policies, agent configurations, entities, audit log.
 - **S3**: Long-term retention of raw, normalized, and processed data.
 
 ## Development Setup
 
-The project uses `uv` for python environment management.
+The project uses `uv` for Python environment management.
 
 ```bash
 # Install all packages in editable mode
@@ -235,22 +288,24 @@ pytest ingestion-api/tests/ -v
 
 | Layer | Technology |
 |---|---|
-| Languages | Python, Go, TypeScript |
+| Languages | Python, TypeScript |
+| AI / Agents | LangChain, LangGraph — model-agnostic (OpenAI, Anthropic, self-hosted via vLLM/Ollama, etc.) |
 | Frameworks | FastAPI, React, Pydantic |
 | Message Bus | Apache Kafka |
 | Search | Elasticsearch |
 | Database | PostgreSQL |
 | Object Storage | S3 (MinIO for local) |
 | Containerization | Docker, Kubernetes |
-| CI/CD | GitHub Actions, Helm |
+| CI/CD | GitHub Actions |
 
 ## Deployment
 
 Kubernetes manifests are organized by namespace in `deploy/k8s/`:
 - `umbrella-streaming`: Kafka
-- `umbrella-storage`: Elasticsearch, Logstash, MinIO
+- `umbrella-storage`: Elasticsearch, Logstash, MinIO, PostgreSQL
 - `umbrella-connectors`: Connector and Processor deployments
 - `umbrella-ingestion`: Ingestion Service
+- `umbrella-ui`: UI Backend + Frontend
 
 ## Screenshots
 

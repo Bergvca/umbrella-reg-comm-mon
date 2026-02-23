@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Umbrella is a regulatory communications monitoring platform. It captures messages from multiple channels (email, Teams, Bloomberg, turrets), normalizes them into a canonical schema, and indexes them in Elasticsearch.
+Umbrella is an AI-powered behavioral analytics platform. It ingests data from diverse sources (email, chat, trade feeds, social media, call recordings, etc.), normalizes it into a unified schema, indexes it in Elasticsearch, and applies AI-powered analysis via configurable LangChain agents. Regulatory communications monitoring is one use case among many (trade surveillance, social media monitoring, call centre analytics, etc.).
 
 ## Pipeline Architecture
 
@@ -20,6 +20,25 @@ Connectors → Kafka(raw-messages) → Processors → Kafka(parsed-messages)
 
 The connector framework (`BaseConnector`) orchestrates Kafka producer, health server, dead-letter handler, and retry logic via `asyncio.TaskGroup`. Connectors implement `ingest()` as an async generator yielding `RawMessage`.
 
+## AI Analytics Layer
+
+The platform's core differentiator is a two-part analytics layer:
+
+**General analytics pipelines** (run automatically on ingested data):
+- **Deduplication** — content fingerprinting and fuzzy matching to collapse duplicates across sources
+- **Email threading** — reconstructs conversation threads from headers and heuristics
+- **Outlier detection** — statistical/ML flagging of anomalous behavior (volume spikes, off-hours activity, unusual patterns)
+- **Entity resolution** — links mentions across sources into unified entity profiles
+- **Audio transcription & diarization** — Whisper-based speech-to-text with speaker diarization for calls, voicemails, recordings
+- **NLP enrichment** — lexicon matching, NER, sentiment analysis, language detection/translation
+
+**LangChain agent system**:
+- **Agent Runtime** — LangChain/LangGraph execution engine that loads agent configs from PostgreSQL, runs them with memory, tool calling, and structured output
+- **Tool Catalog** — pre-built tools for ES full-text search, ES aggregations, SQL queries, entity lookups
+- **Agent definitions and tools** live in `agents/`
+- **Agent Builder UI** — no-code interface lives in the UI layer (`ui/`); configs stored in PostgreSQL, executed by the runtime
+- Every agent action is logged for audit traceability
+
 ## Key Packages
 
 | Package | Location | Installs as |
@@ -27,6 +46,7 @@ The connector framework (`BaseConnector`) orchestrates Kafka producer, health se
 | Connector framework + shared schema | `connectors/connector-framework/` | `umbrella-connector-framework` (provides `umbrella_connector` + `umbrella_schema`) |
 | Email connector | `connectors/email/` | `umbrella-email-connector` (provides `umbrella_email`) |
 | Ingestion service | `ingestion-api/` | `umbrella-ingestion` (provides `umbrella_ingestion`) |
+| Agent runtime + tools | `agents/` | `umbrella-agents` (LangChain agent runtime and tool definitions) |
 
 All use Hatchling build backend. The email connector and ingestion service both depend on `umbrella-connector-framework` as a local dependency.
 
@@ -63,8 +83,11 @@ python -m umbrella_email connector
 # Email processor (Stage 2: Kafka → parse → Kafka)
 python -m umbrella_email processor
 
-# Ingestion service (normalize parsed → Kafka + S3)
+# Ingestion service (Stage 3: normalize parsed → Kafka + S3)
 python -m umbrella_ingestion
+
+# Agent runtime service (executes LangChain agents)
+python -m umbrella_agents
 ```
 
 ## Local Infrastructure
@@ -86,14 +109,17 @@ All services use **pydantic-settings** with env var prefixes. Key prefixes:
 - `INGESTION_API_` — base URL, timeout, mTLS paths
 - `PROCESSOR_` — processor-specific Kafka and S3 settings
 - `S3_` / `AWS_` — S3 endpoint, bucket, credentials
+- `LLM_` — LLM provider (OpenAI, Anthropic, self-hosted, etc.), API keys, model selection
+- `AGENTS_` — agent service port, PostgreSQL connection (reads agent configs)
 
 ## Kubernetes Deployment
 
 Manifests live in `deploy/k8s/` organized by namespace:
 - `umbrella-streaming/` — Kafka StatefulSet + topic-creation Job
 - `umbrella-storage/` — Elasticsearch, Logstash, MinIO
-- `umbrella-connectors/` — Email processor and future connectors
+- `umbrella-connectors/` — Connector and Processor deployments
 - `umbrella-ingestion/` — Ingestion/normalization service
+- `umbrella-ui/` — UI Backend + Frontend
 
 Kafka topics: `raw-messages`, `parsed-messages`, `normalized-messages`, `processing-results`, `alerts`, `dead-letter`, `normalized-messages-dlq`
 
@@ -115,4 +141,5 @@ The K8s migration Job (Flyway) reads migrations from a ConfigMap volume — it d
 - **Normalizer registry pattern** — `ingestion-api/umbrella_ingestion/normalizers/` has a `BaseNormalizer` ABC and `NormalizerRegistry` mapping `Channel` → normalizer
 - New connectors: subclass `BaseConnector`, implement `ingest() -> AsyncIterator[RawMessage]`
 - New normalizers: subclass `BaseNormalizer`, register in the `NormalizerRegistry`
-- use UV for a all venv python tasks
+- **LangChain agents** — use LangChain/LangGraph for all AI agent implementations; agents access data via tools (ES and Postgres), not direct DB calls
+- use UV for all venv python tasks
