@@ -6,7 +6,7 @@ from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
 
@@ -16,6 +16,7 @@ from umbrella_ui.config import Settings
 logger = structlog.get_logger()
 
 _bearer_scheme = HTTPBearer()
+_bearer_scheme_optional = HTTPBearer(auto_error=False)
 
 
 def _get_settings(request: Request) -> Settings:
@@ -45,6 +46,33 @@ async def get_current_user(
         "id": UUID(payload["sub"]),
         "roles": payload.get("roles", []),
     }
+
+
+async def get_current_user_sse(
+    request: Request,
+    settings: Annotated[Settings, Depends(_get_settings)],
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme_optional)] = None,
+    token: str | None = Query(default=None),
+) -> dict:
+    """Like get_current_user but also accepts ``?token=`` for SSE clients that cannot set headers."""
+    raw = None
+    if credentials is not None:
+        raw = credentials.credentials
+    elif token is not None:
+        raw = token
+
+    if raw is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    try:
+        payload = decode_token(raw, settings)
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+
+    if payload.get("type") != "access":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
+
+    return {"id": UUID(payload["sub"]), "roles": payload.get("roles", [])}
 
 
 def require_role(*allowed_roles: str):

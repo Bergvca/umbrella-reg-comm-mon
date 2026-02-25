@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from umbrella_agents.config import Settings
 from umbrella_agents.db.engine import AgentEngine
 from umbrella_agents.es.client import ESClient
+from umbrella_agents.run_registry import RunRegistry
 
 logger = structlog.get_logger()
 
@@ -22,9 +23,11 @@ async def lifespan(app: FastAPI):
     app.state.db = db
     es = ESClient(settings)
     app.state.es = es
+    app.state.run_registry = RunRegistry()
     logger.info("agent_engine_created")
     logger.info("elasticsearch_client_created")
     yield
+    await app.state.run_registry.cancel_all()
     await es.close()
     await db.close()
     logger.info("shutdown_complete")
@@ -48,10 +51,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     from umbrella_agents.routers.execute import router as execute_router
     from umbrella_agents.routers.health import router as health_router
+    from umbrella_agents.routers.stream import router as stream_router
     from umbrella_agents.routers.translate import router as translate_router
 
     app.include_router(health_router)
     app.include_router(translate_router)
     app.include_router(execute_router)
+    app.include_router(stream_router)
 
     return app

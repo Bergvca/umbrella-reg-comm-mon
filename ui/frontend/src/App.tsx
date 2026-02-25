@@ -16,6 +16,7 @@ import { EntityDetailPage } from "@/pages/EntityDetailPage";
 import { AgentsPage } from "@/pages/AgentsPage";
 import { AgentDetailPage } from "@/pages/AgentDetailPage";
 import { AgentEditorPage } from "@/pages/AgentEditorPage";
+import { AgentPlaygroundPage } from "@/pages/AgentPlaygroundPage";
 import { AdminPage } from "@/pages/AdminPage";
 import { AuditPage } from "@/pages/AuditPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
@@ -68,6 +69,7 @@ export function App() {
           <Route path="/agents/new" element={<AgentEditorPage />} />
           <Route path="/agents/:id" element={<AgentDetailPage />} />
           <Route path="/agents/:id/edit" element={<AgentEditorPage />} />
+          <Route path="/agents/:id/playground" element={<AgentPlaygroundPage />} />
 
           <Route path="/admin" element={<AdminPage />} />
           <Route path="/audit" element={<AuditPage />} />

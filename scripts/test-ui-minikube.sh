@@ -8,6 +8,7 @@
 #   Stage 6 — login + auth
 #   Stage 7 — frontend serves SPA
 #   Stage 8 — agent runtime health + NL search (502 expected without LLM key)
+#   Stage 9 — agent streaming endpoints (execute-stream, cancel)
 #
 # Usage:
 #   ./scripts/test-ui-minikube.sh              # rebuild + redeploy + test
@@ -259,6 +260,80 @@ else
     warn "✗ NL search returned unexpected HTTP $NL_HTTP"
 fi
 
+# Stage 9: agent streaming endpoints
+info "Stage 9: Agent streaming endpoints..."
+STREAM_ENDPOINT_OK=0
+
+# Generate a supervisor token for the cancel test
+SUPERVISOR_TOKEN=$(uv run --project ui/backend python -c "
+from jose import jwt
+import time
+payload = {
+    'sub': '00000000-0000-0000-0000-000000000001',
+    'roles': ['supervisor'],
+    'type': 'access',
+    'exp': int(time.time()) + 300,
+}
+print(jwt.encode(payload, '$TEST_JWT_SECRET', algorithm='HS256'))
+")
+
+# Test POST /agent-runs/stream — we expect a 502 (runtime can't reach LLM) or
+# a 201 with {run_id, status} if an agent exists and the runtime is configured.
+# If there are no agents, it'll be 422 or 404 — either way the endpoint is alive.
+# First, find any agent id (may not exist)
+AGENT_LIST=$(curl -s -H "Authorization: Bearer $UI_TOKEN" \
+    http://localhost:8001/api/v1/agents)
+FIRST_AGENT_ID=$(echo "$AGENT_LIST" | jq -r '.items[0].id // empty' 2>/dev/null)
+
+if [ -n "$FIRST_AGENT_ID" ] && [ "$FIRST_AGENT_ID" != "null" ]; then
+    STREAM_HTTP=$(curl -s -o /tmp/stream_resp.json -w "%{http_code}" \
+        -X POST http://localhost:8001/api/v1/agent-runs/stream \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $UI_TOKEN" \
+        -d "{\"agent_id\":\"$FIRST_AGENT_ID\",\"input\":\"streaming test\"}")
+
+    if [ "$STREAM_HTTP" = "201" ]; then
+        STREAM_RUN_ID=$(jq -r '.run_id // empty' /tmp/stream_resp.json 2>/dev/null)
+        if [ -n "$STREAM_RUN_ID" ] && [ "$STREAM_RUN_ID" != "null" ]; then
+            info "✓ POST /agent-runs/stream → 201 (run_id=$STREAM_RUN_ID)"
+            STREAM_ENDPOINT_OK=1
+
+            # Test cancel endpoint
+            CANCEL_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+                -X POST "http://localhost:8001/api/v1/agent-runs/$STREAM_RUN_ID/cancel" \
+                -H "Authorization: Bearer $SUPERVISOR_TOKEN")
+            if [ "$CANCEL_HTTP" = "200" ]; then
+                info "✓ POST /agent-runs/{id}/cancel → 200"
+            else
+                warn "~ POST /agent-runs/{id}/cancel → $CANCEL_HTTP (run may have already finished)"
+                # Not a failure — run may have completed before cancel reached it
+            fi
+
+            # Test SSE stream endpoint responds (just check the content-type header)
+            STREAM_SSE_CT=$(curl -s -o /dev/null -D - --max-time 3 \
+                -H "Authorization: Bearer $UI_TOKEN" \
+                "http://localhost:8001/api/v1/agent-runs/$STREAM_RUN_ID/stream" 2>/dev/null \
+                | grep -i "content-type" | head -1 || echo "")
+            if echo "$STREAM_SSE_CT" | grep -qi "text/event-stream"; then
+                info "✓ GET /agent-runs/{id}/stream → text/event-stream"
+            else
+                warn "~ SSE stream content-type not verified (run may have completed)"
+            fi
+        else
+            warn "✗ POST /agent-runs/stream → 201 but no run_id in response"
+        fi
+    elif [ "$STREAM_HTTP" = "502" ]; then
+        warn "~ POST /agent-runs/stream → 502 (expected — no LLM API key)"
+        STREAM_ENDPOINT_OK=2
+    else
+        warn "✗ POST /agent-runs/stream → HTTP $STREAM_HTTP"
+    fi
+    rm -f /tmp/stream_resp.json
+else
+    warn "~ No agents found — skipping streaming endpoint test"
+    STREAM_ENDPOINT_OK=2  # treat as expected-skip
+fi
+
 # Cleanup port-forwards
 kill $PF_PID $PF_FE_PID 2>/dev/null || true
 
@@ -278,11 +353,18 @@ elif [ "$NL_SEARCH_OK" -eq 2 ]; then
 else
     echo "Stage 8b (NL search):      [✗ FAIL]"
 fi
+if [ "$STREAM_ENDPOINT_OK" -eq 1 ]; then
+    echo "Stage 9  (Streaming):      [✓ PASS]"
+elif [ "$STREAM_ENDPOINT_OK" -eq 2 ]; then
+    echo "Stage 9  (Streaming):      [~ WARN] 502 or no agents — streaming endpoint skipped/degraded"
+else
+    echo "Stage 9  (Streaming):      [✗ FAIL]"
+fi
 echo "=========================================="
 echo ""
 
-# Stage 8b is excluded from the hard pass/fail — a missing LLM key is expected in CI
-if [ "$UI_RESULT" -gt 0 ] && [ "$LOGIN_OK" -eq 1 ] && [ "$FRONTEND_OK" -eq 1 ] && [ "$AGENT_HEALTH_OK" -eq 1 ] && [ "$NL_SEARCH_OK" -ne 0 ]; then
+# Stages 8b and 9 are excluded from hard pass/fail — a missing LLM key or no agents is expected in CI
+if [ "$UI_RESULT" -gt 0 ] && [ "$LOGIN_OK" -eq 1 ] && [ "$FRONTEND_OK" -eq 1 ] && [ "$AGENT_HEALTH_OK" -eq 1 ] && [ "$NL_SEARCH_OK" -ne 0 ] && [ "$STREAM_ENDPOINT_OK" -ne 0 ]; then
     info "✓ UI TEST PASSED"
     echo ""
     info "To access the UI:"

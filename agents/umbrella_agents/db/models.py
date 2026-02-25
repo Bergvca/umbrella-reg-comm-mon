@@ -27,7 +27,7 @@ class Model(Base):
     api_key_secret: Mapped[str | None] = mapped_column(Text)
     max_tokens: Mapped[int] = mapped_column(default=4096)
     is_active: Mapped[bool] = mapped_column(default=True)
-    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("iam.users.id"))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     created_at: Mapped[datetime] = mapped_column(server_default="now()")
     updated_at: Mapped[datetime] = mapped_column(server_default="now()")
 
@@ -65,7 +65,7 @@ class Agent(Base):
     output_schema: Mapped[dict | None] = mapped_column(JSONB)
     is_builtin: Mapped[bool] = mapped_column(default=False)
     is_active: Mapped[bool] = mapped_column(default=True)
-    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("iam.users.id"))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     created_at: Mapped[datetime] = mapped_column(server_default="now()")
     updated_at: Mapped[datetime] = mapped_column(server_default="now()")
 
@@ -125,7 +125,7 @@ class Run(Base):
     token_usage: Mapped[dict | None] = mapped_column(JSONB)
     iterations: Mapped[int | None]
     duration_ms: Mapped[int | None]
-    triggered_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("iam.users.id"), nullable=False)
+    triggered_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(server_default="now()")
     completed_at: Mapped[datetime | None]
 
