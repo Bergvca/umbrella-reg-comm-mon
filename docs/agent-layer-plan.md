@@ -928,28 +928,40 @@ Pre-built agent configs shipped as a ConfigMap, loaded by the migration or a see
 
 ## 12. Implementation Phases
 
-### Phase 1 — Foundation (Core Runtime + CRUD)
+### Phase 1a — Database + Agent Runtime Skeleton + NL Search
 
-**Goal:** Agents can be created, configured, and executed via API. Natural language query translation is available.
+**Goal:** Schema exists, agent runtime runs with health endpoint, and natural language query translation is available end-to-end.
 
-1. Write migration `V10__agent.sql` — create `agent` schema and all tables
+1. Write migration `V10__agent.sql` — create `agent` schema and all 7 tables
 2. Update `deploy/k8s/umbrella-storage/postgresql/migration-job.yaml` ConfigMap
 3. Create `agents/` package skeleton:
    - `config.py` (pydantic-settings)
-   - `db/models.py` (SQLAlchemy models)
-   - `model_router.py` (LiteLLM integration)
-   - `tools/registry.py` + `es_search.py` + `sql_query.py` (2 core tools)
-   - `executor.py` (LangGraph ReAct agent builder + runner)
-   - `callbacks/audit.py` (run_steps logger)
-   - `routers/execute.py` + `routers/health.py`
-   - `routers/translate.py` — `POST /translate-query` endpoint for NL → ES query translation
+   - `db/engine.py` (async DB engine + session factory)
+   - `db/models.py` (SQLAlchemy models for all 7 tables)
+   - `es/client.py` (ES client wrapper)
+   - `model_router.py` (LiteLLM integration — NL→ES query translation)
+   - `routers/health.py` (`GET /health`)
+   - `routers/translate.py` (`POST /translate-query` — NL → ES query DSL)
    - `app.py` + `__main__.py`
-4. Add UI backend routers: agents CRUD, agent-runs execution proxy, agent-models, agent-tools
-5. Add `POST /api/v1/messages/nl-search` endpoint to UI backend (proxies to runtime `/translate-query`, validates + executes the generated ES query)
-6. Add Pydantic schemas for all request/response models (including `NLSearchRequest` / `NLSearchResponse`)
-7. Tests for executor, tools, query translation, and API endpoints
+4. Add `POST /api/v1/messages/nl-search` endpoint to UI backend (proxies to runtime `/translate-query`, validates + executes the generated ES query)
+5. Add Pydantic schemas: `NLSearchRequest`, `NLSearchResponse`
+6. Tests for query translation and NL search endpoint
 
-**Deliverable:** Working agent execution and NL search via `curl` / API client.
+**Deliverable:** Working NL search via `curl` / API client. Agent runtime serves health and translation endpoints.
+
+### Phase 1b — Agent Executor, Tools, CRUD
+
+**Goal:** Agents can be created, configured, and executed via API.
+
+1. `executor.py` (LangGraph ReAct agent builder + runner)
+2. Tool catalog: `tools/registry.py` + `es_search.py` + `sql_query.py`
+3. `callbacks/audit.py` (run_steps logger)
+4. `routers/execute.py` (`POST /execute` on runtime)
+5. Add UI backend routers: agents CRUD, agent-runs execution proxy, agent-models, agent-tools
+6. Add Pydantic schemas for all agent CRUD + execution request/response models
+7. Tests for executor, tools, and CRUD endpoints
+
+**Deliverable:** Working agent execution and CRUD via `curl` / API client.
 
 ### Phase 2 — Agent Builder UI + Natural Language Search
 

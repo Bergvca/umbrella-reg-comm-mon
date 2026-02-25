@@ -31,6 +31,21 @@ class MessageSearchResponse(BaseModel):
     limit: int
 
 
+class NLSearchRequest(BaseModel):
+    """Request body for POST /messages/nl-search."""
+
+    query: str
+    offset: int = 0
+    limit: int = 20
+
+
+class NLSearchResponse(MessageSearchResponse):
+    """Standard search response plus the generated ES query and explanation."""
+
+    generated_query: dict
+    explanation: str
+
+
 class AudioUrlResponse(BaseModel):
     url: str
     expires_in: int

@@ -3,7 +3,11 @@
 #
 # Assumes the full pipeline is already running (via test-pipeline-minikube.sh).
 # Rebuilds only the UI images, redeploys the umbrella-ui namespace, seeds the
-# test user, and runs Stage 5 (API search) + Stage 6 (login/auth) checks.
+# test user, and runs:
+#   Stage 5 — API message search
+#   Stage 6 — login + auth
+#   Stage 7 — frontend serves SPA
+#   Stage 8 — agent runtime health + NL search (502 expected without LLM key)
 #
 # Usage:
 #   ./scripts/test-ui-minikube.sh              # rebuild + redeploy + test
@@ -69,6 +73,7 @@ if [ "$SKIP_BUILD" = false ]; then
     info "Building UI images..."
     docker build --no-cache -f ui/backend/Dockerfile -t umbrella-ui-backend:latest .
     docker build --no-cache -f ui/frontend/Dockerfile -t umbrella-ui-frontend:latest .
+    docker build --no-cache -f agents/Dockerfile -t umbrella-agent-runtime:latest .
     info "Images built successfully"
     echo ""
 fi
@@ -80,18 +85,31 @@ if [ "$TEST_ONLY" = false ]; then
     kubectl apply -f deploy/k8s/umbrella-ui/secret.yaml
     kubectl apply -f deploy/k8s/umbrella-ui/backend/
     kubectl apply -f deploy/k8s/umbrella-ui/frontend/
+    kubectl apply -f deploy/k8s/umbrella-ui/agents/
     kubectl apply -f deploy/k8s/umbrella-ui/ingress.yaml
 
     # Force pod restart to pick up new images
     info "Restarting UI pods..."
     kubectl rollout restart deployment/umbrella-ui-backend -n umbrella-ui
     kubectl rollout restart deployment/umbrella-ui-frontend -n umbrella-ui
+    kubectl rollout restart deployment/umbrella-agent-runtime -n umbrella-ui
 
     info "Waiting for UI backend..."
     kubectl rollout status deployment/umbrella-ui-backend -n umbrella-ui --timeout=120s
 
     info "Waiting for UI frontend..."
     kubectl rollout status deployment/umbrella-ui-frontend -n umbrella-ui --timeout=60s
+
+    info "Waiting for agent runtime..."
+    kubectl rollout status deployment/umbrella-agent-runtime -n umbrella-ui --timeout=120s
+
+    info "Seeding agent model..."
+    # Delete any previous completed/failed run so kubectl apply can recreate it
+    kubectl delete job umbrella-agent-model-seed -n umbrella-ui --ignore-not-found
+    kubectl apply -f deploy/k8s/umbrella-ui/agents/seed-job.yaml
+    kubectl wait job/umbrella-agent-model-seed -n umbrella-ui \
+        --for=condition=complete --timeout=60s \
+        || { warn "Agent model seed job did not complete in time"; kubectl logs -n umbrella-ui -l app=umbrella-agent-model-seed --tail=20; }
 
     # Seed test user (idempotent — ON CONFLICT DO NOTHING).
     # Exec into the running PostgreSQL pod directly.
@@ -208,6 +226,39 @@ else
     warn "✗ Frontend returned HTTP $FRONTEND_RESPONSE"
 fi
 
+# Stage 8: agent runtime health + NL search
+info "Stage 8: Agent runtime health + NL search..."
+AGENT_HEALTH_OK=0
+NL_SEARCH_OK=0  # 0=fail, 1=pass (LLM worked), 2=expected-fail (no LLM key)
+
+# Health check via the backend port-forward (PF_PID still running on 8001)
+AGENT_HEALTH_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -H "Authorization: Bearer $UI_TOKEN" \
+    http://localhost:8001/api/v1/agents)
+if [ "$AGENT_HEALTH_RESPONSE" = "200" ]; then
+    info "✓ Agent runtime reachable (GET /agents → 200)"
+    AGENT_HEALTH_OK=1
+else
+    warn "✗ GET /agents returned HTTP $AGENT_HEALTH_RESPONSE (agent runtime may be down)"
+fi
+
+# NL search — expect 502 without an LLM key, 200 if one is configured
+NL_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST http://localhost:8001/api/v1/messages/nl-search \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $UI_TOKEN" \
+    -d '{"query":"test messages from last week","limit":5}')
+
+if [ "$NL_HTTP" = "200" ]; then
+    info "✓ NL search returned 200 (LLM key is configured)"
+    NL_SEARCH_OK=1
+elif [ "$NL_HTTP" = "502" ]; then
+    warn "~ NL search returned 502 (expected — no LLM API key set in umbrella-agent-runtime-credentials secret)"
+    NL_SEARCH_OK=2
+else
+    warn "✗ NL search returned unexpected HTTP $NL_HTTP"
+fi
+
 # Cleanup port-forwards
 kill $PF_PID $PF_FE_PID 2>/dev/null || true
 
@@ -216,13 +267,22 @@ echo ""
 echo "=========================================="
 echo "UI Test Summary"
 echo "=========================================="
-echo "Stage 5 (API search):      $([ "$UI_RESULT" -gt 0 ]  && echo '[✓ PASS]' || echo '[✗ FAIL]')"
-echo "Stage 6 (Login/auth):      $([ "$LOGIN_OK" -eq 1 ]   && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 5 (API search):      $([ "$UI_RESULT" -gt 0 ]   && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 6 (Login/auth):      $([ "$LOGIN_OK" -eq 1 ]    && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "Stage 7 (Frontend serves): $([ "$FRONTEND_OK" -eq 1 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 8a (Agent runtime):  $([ "$AGENT_HEALTH_OK" -eq 1 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+if [ "$NL_SEARCH_OK" -eq 1 ]; then
+    echo "Stage 8b (NL search):      [✓ PASS]"
+elif [ "$NL_SEARCH_OK" -eq 2 ]; then
+    echo "Stage 8b (NL search):      [~ WARN] 502 — set OPENAI_API_KEY in umbrella-agent-runtime-credentials secret"
+else
+    echo "Stage 8b (NL search):      [✗ FAIL]"
+fi
 echo "=========================================="
 echo ""
 
-if [ "$UI_RESULT" -gt 0 ] && [ "$LOGIN_OK" -eq 1 ] && [ "$FRONTEND_OK" -eq 1 ]; then
+# Stage 8b is excluded from the hard pass/fail — a missing LLM key is expected in CI
+if [ "$UI_RESULT" -gt 0 ] && [ "$LOGIN_OK" -eq 1 ] && [ "$FRONTEND_OK" -eq 1 ] && [ "$AGENT_HEALTH_OK" -eq 1 ] && [ "$NL_SEARCH_OK" -ne 0 ]; then
     info "✓ UI TEST PASSED"
     echo ""
     info "To access the UI:"
@@ -232,6 +292,11 @@ if [ "$UI_RESULT" -gt 0 ] && [ "$LOGIN_OK" -eq 1 ] && [ "$FRONTEND_OK" -eq 1 ]; 
     info "To access the API:"
     echo "  kubectl port-forward -n umbrella-ui svc/umbrella-ui-backend 8001:8000"
     echo "  Open http://localhost:8001/docs"
+    echo ""
+    info "To enable NL search, add your LLM key:"
+    echo "  kubectl patch secret umbrella-agent-runtime-credentials -n umbrella-ui \\"
+    echo "    --type=merge -p '{\"stringData\":{\"OPENAI_API_KEY\":\"sk-...\"}}'"
+    echo "  kubectl rollout restart deployment/umbrella-agent-runtime -n umbrella-ui"
     exit 0
 else
     error "✗ UI TEST FAILED"
@@ -239,6 +304,7 @@ else
     error "Debugging:"
     echo "  kubectl logs -n umbrella-ui -l app=umbrella-ui-backend --tail=50"
     echo "  kubectl logs -n umbrella-ui -l app=umbrella-ui-frontend --tail=50"
+    echo "  kubectl logs -n umbrella-ui -l app=umbrella-agent-runtime --tail=50"
     echo "  kubectl describe pod -n umbrella-ui -l app=umbrella-ui-backend"
     exit 1
 fi

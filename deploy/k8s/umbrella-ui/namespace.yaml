@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: umbrella-ui
+  labels:
+    # Allow this namespace to reach Kafka
+    umbrella-kafka-access: "true"

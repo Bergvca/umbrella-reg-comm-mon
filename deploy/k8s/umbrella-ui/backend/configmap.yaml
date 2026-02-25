@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: umbrella-ui-backend-config
+  namespace: umbrella-ui
+data:
+  UMBRELLA_UI_ELASTICSEARCH_URL: "http://elasticsearch.umbrella-storage.svc:9200"
+  UMBRELLA_UI_S3_ENDPOINT_URL: "http://minio.umbrella-storage.svc:9000"
+  UMBRELLA_UI_S3_BUCKET: "umbrella"
+  UMBRELLA_UI_S3_REGION: "us-east-1"
+  UMBRELLA_UI_HOST: "0.0.0.0"
+  UMBRELLA_UI_PORT: "8000"
+  UMBRELLA_UI_LOG_LEVEL: "INFO"
+  UMBRELLA_UI_LOG_JSON: "true"
+  UMBRELLA_UI_AGENTS_BASE_URL: "http://umbrella-agent-runtime.umbrella-ui.svc:8001"
+  AWS_ACCESS_KEY_ID: "minioadmin"
+  AWS_SECRET_ACCESS_KEY: "minioadmin"

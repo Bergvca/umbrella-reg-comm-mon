@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { NavLink } from "react-router";
-import { LayoutDashboard, AlertTriangle, Search, ListTodo, Shield, Users, FileText, } from "lucide-react";
+import { LayoutDashboard, AlertTriangle, Search, ListTodo, Shield, Users, FileText, Contact, Bot, } from "lucide-react";
 import { cn, hasRole } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth";
 import { Separator } from "@/components/ui/separator";
@@ -9,6 +9,8 @@ const NAV_ITEMS = [
     { to: "/alerts", label: "Alerts", icon: AlertTriangle, minRole: "reviewer" },
     { to: "/messages", label: "Messages", icon: Search, minRole: "reviewer" },
     { to: "/queues", label: "Queues", icon: ListTodo, minRole: "reviewer" },
+    { to: "/entities", label: "Entities", icon: Contact, minRole: "admin" },
+    { to: "/agents", label: "Agents", icon: Bot, minRole: "reviewer" },
     { to: "/policies", label: "Policies", icon: Shield, minRole: "admin" },
     { to: "/admin", label: "Users & Groups", icon: Users, minRole: "admin" },
     { to: "/audit", label: "Audit Log", icon: FileText, minRole: "supervisor" },

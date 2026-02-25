@@ -1,5 +1,5 @@
 import { apiFetch } from "./client";
-import type { ESMessage, MessageSearchResponse } from "@/lib/types";
+import type { ESMessage, MessageSearchResponse, NLSearchResponse } from "@/lib/types";
 
 export interface AudioUrlResponse {
   url: string;
@@ -35,6 +35,17 @@ export async function searchMessages(
   sp.set("offset", String(params.offset ?? 0));
   sp.set("limit", String(params.limit ?? 20));
   return apiFetch(`/messages/search?${sp.toString()}`);
+}
+
+export async function nlSearchMessages(body: {
+  query: string;
+  offset?: number;
+  limit?: number;
+}): Promise<NLSearchResponse> {
+  return apiFetch<NLSearchResponse>("/messages/nl-search", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 export async function getMessage(

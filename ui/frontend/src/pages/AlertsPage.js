@@ -2,12 +2,18 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useSearchParams } from "react-router";
 import { AlertFilters } from "@/components/alerts/AlertFilters";
 import { AlertTable } from "@/components/alerts/AlertTable";
+import { ExportButton } from "@/components/export/ExportButton";
+import { GenerateAlertsDialog } from "@/components/alerts/GenerateAlertsDialog";
 import { useAlerts } from "@/hooks/useAlerts";
+import { useAuthStore } from "@/stores/auth";
+import { hasRole } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 const LIMIT = 50;
 export function AlertsPage() {
     const [searchParams, setSearchParams] = useSearchParams();
+    const user = useAuthStore((s) => s.user);
+    const isSupervisor = user ? hasRole(user.roles, "supervisor") : false;
     const severity = searchParams.get("severity") ?? undefined;
     const status = searchParams.get("status") ?? undefined;
     const offset = Number(searchParams.get("offset") ?? 0);
@@ -40,5 +46,5 @@ export function AlertsPage() {
     if (isError) {
         return (_jsx("div", { className: "p-6", children: _jsx(Card, { children: _jsxs(CardContent, { className: "pt-6 text-center space-y-3", children: [_jsx("p", { className: "text-muted-foreground", children: "Failed to load alerts." }), _jsx(Button, { variant: "outline", onClick: () => void refetch(), children: "Retry" })] }) }) }));
     }
-    return (_jsxs("div", { className: "p-6 space-y-4", children: [_jsx("h1", { className: "text-2xl font-semibold", children: "Alerts" }), _jsx(AlertFilters, { filters: filters, onChange: handleFiltersChange }), _jsx(AlertTable, { data: data?.items, total: data?.total, offset: offset, limit: LIMIT, onPageChange: handlePageChange, isLoading: isLoading })] }));
+    return (_jsxs("div", { className: "p-6 space-y-4", children: [_jsxs("div", { className: "flex items-center justify-between", children: [_jsx("h1", { className: "text-2xl font-semibold", children: "Alerts" }), isSupervisor && (_jsxs("div", { className: "flex items-center gap-2", children: [_jsx(GenerateAlertsDialog, {}), _jsx(ExportButton, { type: "alerts", params: Object.fromEntries(Object.entries({ severity, status }).filter(([, v]) => v != null)) })] }))] }), _jsx(AlertFilters, { filters: filters, onChange: handleFiltersChange }), _jsx(AlertTable, { data: data?.items, total: data?.total, offset: offset, limit: LIMIT, onPageChange: handlePageChange, isLoading: isLoading })] }));
 }

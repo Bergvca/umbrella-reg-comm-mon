@@ -2,7 +2,7 @@
 
 Database: `umbrella`
 
-Five schemas by domain:
+Six schemas by domain:
 
 | Schema | Purpose |
 |---|---|
@@ -11,6 +11,7 @@ Five schemas by domain:
 | `alert` | Alerts linked to Elasticsearch events |
 | `review` | Decisions, statuses, review queues, audit trail |
 | `entity` | Entity resolution — people, organizations, handles, attributes |
+| `agent` | AI agent definitions, models, tools, runs, audit trail |
 
 Migrations live in `infrastructure/postgresql/migrations/` (Flyway V-versioned).
 
@@ -322,6 +323,131 @@ Indexes: `(entity_id)`
 
 ---
 
+## Schema: `agent`
+
+### `agent.models`
+
+Registered LLM endpoints. Admins configure these; agent builders select from them.
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | uuid | PK, default `gen_random_uuid()` |
+| `name` | text | UNIQUE NOT NULL |
+| `provider` | text | NOT NULL — LiteLLM provider key, e.g. `openai`, `anthropic`, `ollama` |
+| `model_id` | text | NOT NULL — provider-specific model ID |
+| `base_url` | text | NULL for cloud providers; endpoint URL for self-hosted |
+| `api_key_secret` | text | NULL — reference to K8s secret key |
+| `max_tokens` | int | NOT NULL DEFAULT 4096 |
+| `is_active` | boolean | NOT NULL DEFAULT true |
+| `created_by` | uuid | FK → `iam.users.id` |
+| `created_at` | timestamptz | NOT NULL DEFAULT now() |
+| `updated_at` | timestamptz | NOT NULL DEFAULT now() |
+
+### `agent.tools`
+
+Registry of available tools (built-in and custom).
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | uuid | PK, default `gen_random_uuid()` |
+| `name` | text | UNIQUE NOT NULL — machine name, e.g. `es_search`, `sql_query` |
+| `display_name` | text | NOT NULL |
+| `description` | text | NOT NULL — shown to the LLM as the tool description |
+| `category` | text | NOT NULL, CHECK IN (`builtin`, `custom`) |
+| `parameters_schema` | jsonb | NOT NULL — JSON Schema defining tool input |
+| `is_active` | boolean | NOT NULL DEFAULT true |
+| `created_at` | timestamptz | NOT NULL DEFAULT now() |
+
+### `agent.agents`
+
+Core agent definitions.
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | uuid | PK, default `gen_random_uuid()` |
+| `name` | text | NOT NULL |
+| `description` | text | |
+| `model_id` | uuid | NOT NULL, FK → `agent.models.id` ON DELETE RESTRICT |
+| `system_prompt` | text | NOT NULL |
+| `temperature` | numeric(3,2) | NOT NULL DEFAULT 0.0 |
+| `max_iterations` | int | NOT NULL DEFAULT 10 |
+| `output_schema` | jsonb | NULL — if set, enforces structured output |
+| `is_builtin` | boolean | NOT NULL DEFAULT false |
+| `is_active` | boolean | NOT NULL DEFAULT true |
+| `created_by` | uuid | FK → `iam.users.id` |
+| `created_at` | timestamptz | NOT NULL DEFAULT now() |
+| `updated_at` | timestamptz | NOT NULL DEFAULT now() |
+
+Unique: `(name, created_by)` · Indexes: `(model_id)`, `(created_by)`
+
+### `agent.agent_tools`
+
+Many-to-many: which tools an agent can use.
+
+| Column | Type | Constraints |
+|---|---|---|
+| `agent_id` | uuid | PK, FK → `agent.agents.id` ON DELETE CASCADE |
+| `tool_id` | uuid | PK, FK → `agent.tools.id` ON DELETE CASCADE |
+| `tool_config` | jsonb | NULL — per-agent tool overrides |
+
+Indexes: `(tool_id)`
+
+### `agent.agent_data_sources`
+
+Per-agent data access control (ES indices and PG schemas).
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | uuid | PK, default `gen_random_uuid()` |
+| `agent_id` | uuid | NOT NULL, FK → `agent.agents.id` ON DELETE CASCADE |
+| `source_type` | text | NOT NULL, CHECK IN (`elasticsearch`, `postgresql`) |
+| `source_identifier` | text | NOT NULL — ES index pattern or PG schema |
+| `access_mode` | text | NOT NULL DEFAULT `read`, CHECK IN (`read`) |
+
+Unique: `(agent_id, source_type, source_identifier)` · Indexes: `(agent_id)`
+
+### `agent.runs`
+
+Execution log for every agent invocation.
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | uuid | PK, default `gen_random_uuid()` |
+| `agent_id` | uuid | NOT NULL, FK → `agent.agents.id` ON DELETE RESTRICT |
+| `status` | text | NOT NULL DEFAULT `pending`, CHECK IN (`pending`, `running`, `completed`, `failed`, `cancelled`) |
+| `input` | jsonb | NOT NULL |
+| `output` | jsonb | NULL |
+| `error_message` | text | NULL |
+| `token_usage` | jsonb | NULL — `{ prompt_tokens, completion_tokens, total_tokens }` |
+| `iterations` | int | NULL |
+| `duration_ms` | int | NULL |
+| `triggered_by` | uuid | NOT NULL, FK → `iam.users.id` |
+| `created_at` | timestamptz | NOT NULL DEFAULT now() |
+| `completed_at` | timestamptz | NULL |
+
+Indexes: `(agent_id)`, `(triggered_by)`, `(created_at DESC)`, `(status)`
+
+### `agent.run_steps`
+
+Detailed trace of each step within a run (tool calls, LLM reasoning).
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | uuid | PK, default `gen_random_uuid()` |
+| `run_id` | uuid | NOT NULL, FK → `agent.runs.id` ON DELETE CASCADE |
+| `step_order` | int | NOT NULL |
+| `step_type` | text | NOT NULL, CHECK IN (`llm_call`, `tool_call`, `tool_result`) |
+| `tool_name` | text | NULL — populated for tool_call / tool_result |
+| `input` | jsonb | NOT NULL |
+| `output` | jsonb | NULL |
+| `token_usage` | jsonb | NULL |
+| `duration_ms` | int | NULL |
+| `created_at` | timestamptz | NOT NULL DEFAULT now() |
+
+Indexes: `(run_id, step_order)`
+
+---
+
 ## Database Roles
 
 | Role | Schema access |
@@ -331,8 +457,10 @@ Indexes: `(entity_id)`
 | `alert_rw` | Read/write `alert`; read `iam`, `policy` |
 | `review_rw` | Read/write `review`; read `iam`, `policy`, `alert` |
 | `entity_rw` | Read/write `entity`; read `iam` |
+| `agent_rw` | Read/write `agent`; read `iam`, `entity` |
+| `agent_readonly` | Read `agent`, `iam`, `entity`, `alert`, `review` |
 
-Connection strings are injected via the `postgresql-credentials` Secret as `IAM_DATABASE_URL`, `POLICY_DATABASE_URL`, `ALERT_DATABASE_URL`, `REVIEW_DATABASE_URL`, `ENTITY_DATABASE_URL`.
+Connection strings are injected via the `postgresql-credentials` Secret as `IAM_DATABASE_URL`, `POLICY_DATABASE_URL`, `ALERT_DATABASE_URL`, `REVIEW_DATABASE_URL`, `ENTITY_DATABASE_URL`, `AGENT_DATABASE_URL`.
 
 ---
 
@@ -365,3 +493,12 @@ Connection strings are injected via the `postgresql-credentials` Secret as `IAM_
 | `entity.entities.created_by` | `iam.users.id` |
 | `entity.handles.entity_id` | `entity.entities.id` |
 | `entity.attributes.entity_id` | `entity.entities.id` |
+| `agent.models.created_by` | `iam.users.id` |
+| `agent.agents.model_id` | `agent.models.id` |
+| `agent.agents.created_by` | `iam.users.id` |
+| `agent.agent_tools.agent_id` | `agent.agents.id` |
+| `agent.agent_tools.tool_id` | `agent.tools.id` |
+| `agent.agent_data_sources.agent_id` | `agent.agents.id` |
+| `agent.runs.agent_id` | `agent.agents.id` |
+| `agent.runs.triggered_by` | `iam.users.id` |
+| `agent.run_steps.run_id` | `agent.runs.id` |

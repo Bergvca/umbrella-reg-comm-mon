@@ -1,0 +1,67 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: umbrella-agent-model-seed
+  namespace: umbrella-ui
+  labels:
+    app: umbrella-agent-model-seed
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: umbrella-agent-model-seed
+    spec:
+      restartPolicy: Never
+
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h postgresql.umbrella-storage.svc -p 5432 -U agent_rw; do
+                echo "Waiting for PostgreSQL..."
+                sleep 3
+              done
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+
+      containers:
+        - name: seed
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - |
+              # Strip +asyncpg driver prefix so psql can use the URL
+              DB_URL=$(echo "$AGENTS_DATABASE_URL" | sed 's|+asyncpg||')
+
+              # Escape single quotes for SQL string literals
+              NAME=$(printf '%s' "$AGENT_MODEL_NAME"     | sed "s/'/''/g")
+              PROV=$(printf '%s' "$AGENT_MODEL_PROVIDER" | sed "s/'/''/g")
+              MID=$(printf '%s'  "$AGENT_MODEL_ID"       | sed "s/'/''/g")
+              BURL=$(printf '%s' "$AGENT_MODEL_BASE_URL" | sed "s/'/''/g")
+
+              psql "$DB_URL" -c "
+                INSERT INTO agent.models (name, provider, model_id, base_url, is_active)
+                VALUES ('$NAME', '$PROV', '$MID', NULLIF('$BURL', ''), true)
+                ON CONFLICT (name) DO UPDATE SET
+                  provider   = EXCLUDED.provider,
+                  model_id   = EXCLUDED.model_id,
+                  base_url   = EXCLUDED.base_url,
+                  is_active  = true,
+                  updated_at = now();
+              "
+              echo "Seed complete."
+          envFrom:
+            - secretRef:
+                name: umbrella-agent-runtime-credentials
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi

@@ -13,6 +13,9 @@ import { MessageDetailPage } from "@/pages/MessageDetailPage";
 import { PoliciesPage } from "@/pages/PoliciesPage";
 import { EntitiesPage } from "@/pages/EntitiesPage";
 import { EntityDetailPage } from "@/pages/EntityDetailPage";
+import { AgentsPage } from "@/pages/AgentsPage";
+import { AgentDetailPage } from "@/pages/AgentDetailPage";
+import { AgentEditorPage } from "@/pages/AgentEditorPage";
 import { AdminPage } from "@/pages/AdminPage";
 import { AuditPage } from "@/pages/AuditPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
@@ -59,6 +62,12 @@ export function App() {
           {/* Entity resolution */}
           <Route path="/entities" element={<EntitiesPage />} />
           <Route path="/entities/:id" element={<EntityDetailPage />} />
+
+          {/* Agent builder */}
+          <Route path="/agents" element={<AgentsPage />} />
+          <Route path="/agents/new" element={<AgentEditorPage />} />
+          <Route path="/agents/:id" element={<AgentDetailPage />} />
+          <Route path="/agents/:id/edit" element={<AgentEditorPage />} />
 
           <Route path="/admin" element={<AdminPage />} />
           <Route path="/audit" element={<AuditPage />} />

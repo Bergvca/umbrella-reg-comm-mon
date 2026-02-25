@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     entity_database_url: str = Field(
         description="Async SQLAlchemy URL for the entity_rw role",
     )
+    agent_database_url: str = Field(
+        description="Async SQLAlchemy URL for the agent_rw role",
+    )
 
     # --- JWT ----------------------------------------------------------------
     jwt_secret: str = Field(
@@ -71,6 +74,12 @@ class Settings(BaseSettings):
     s3_presigned_url_expiry: int = Field(
         default=3600,
         description="Pre-signed URL expiry in seconds",
+    )
+
+    # --- Agent Runtime -------------------------------------------------------
+    agents_base_url: str = Field(
+        default="http://localhost:8001",
+        description="Base URL for the agent runtime service",
     )
 
     # --- Server -------------------------------------------------------------

@@ -8,6 +8,7 @@ import {
   Users,
   FileText,
   Contact,
+  Bot,
 } from "lucide-react";
 import { cn, hasRole } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth";
@@ -26,6 +27,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/messages", label: "Messages", icon: Search, minRole: "reviewer" },
   { to: "/queues", label: "Queues", icon: ListTodo, minRole: "reviewer" },
   { to: "/entities", label: "Entities", icon: Contact, minRole: "admin" },
+  { to: "/agents", label: "Agents", icon: Bot, minRole: "reviewer" },
   { to: "/policies", label: "Policies", icon: Shield, minRole: "admin" },
   { to: "/admin", label: "Users & Groups", icon: Users, minRole: "admin" },
   { to: "/audit", label: "Audit Log", icon: FileText, minRole: "supervisor" },

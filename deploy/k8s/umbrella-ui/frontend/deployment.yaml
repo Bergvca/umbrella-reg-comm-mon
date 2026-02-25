@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: umbrella-ui-frontend
+  namespace: umbrella-ui
+  labels:
+    app: umbrella-ui-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: umbrella-ui-frontend
+  template:
+    metadata:
+      labels:
+        app: umbrella-ui-frontend
+    spec:
+      containers:
+        - name: umbrella-ui-frontend
+          image: umbrella-ui-frontend:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 80
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi

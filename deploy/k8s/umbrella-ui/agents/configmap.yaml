@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: umbrella-agent-runtime-config
+  namespace: umbrella-ui
+data:
+  AGENTS_ELASTICSEARCH_URL: "http://elasticsearch.umbrella-storage.svc:9200"
+  AGENTS_HOST: "0.0.0.0"
+  AGENTS_PORT: "8001"
+  AGENTS_LOG_LEVEL: "INFO"
+  AGENTS_LOG_JSON: "true"

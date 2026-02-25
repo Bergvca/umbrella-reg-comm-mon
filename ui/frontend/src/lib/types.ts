@@ -371,3 +371,97 @@ export interface GenerationJobOut {
   started_at: string | null;
   completed_at: string | null;
 }
+
+// ── Agents ────────────────────────────────────────────
+
+export type AgentStatus = "active" | "inactive";
+export type RunStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+
+export interface DataSourceConfig {
+  source_type: "elasticsearch" | "postgresql";
+  source_identifier: string;
+}
+
+export interface ToolSummary {
+  id: string;
+  name: string;
+  display_name: string;
+  tool_config: Record<string, unknown> | null;
+}
+
+export interface ModelOut {
+  id: string;
+  name: string;
+  provider: string;
+  model_id: string;
+  base_url: string | null;
+  max_tokens: number;
+  is_active: boolean;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentOut {
+  id: string;
+  name: string;
+  description: string | null;
+  model: ModelOut;
+  system_prompt: string;
+  temperature: number;
+  max_iterations: number;
+  output_schema: Record<string, unknown> | null;
+  tools: ToolSummary[];
+  data_sources: DataSourceConfig[];
+  is_builtin: boolean;
+  is_active: boolean;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ToolOut {
+  id: string;
+  name: string;
+  display_name: string;
+  description: string;
+  category: string;
+  parameters_schema: Record<string, unknown>;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface RunStepOut {
+  id: string;
+  step_order: number;
+  step_type: string;
+  tool_name: string | null;
+  input: Record<string, unknown>;
+  output: Record<string, unknown> | null;
+  token_usage: Record<string, unknown> | null;
+  duration_ms: number | null;
+  created_at: string;
+}
+
+export interface RunOut {
+  id: string;
+  agent_id: string;
+  status: RunStatus;
+  input: Record<string, unknown>;
+  output: Record<string, unknown> | null;
+  error_message: string | null;
+  token_usage: Record<string, unknown> | null;
+  iterations: number | null;
+  duration_ms: number | null;
+  triggered_by: string;
+  created_at: string;
+  completed_at: string | null;
+  steps: RunStepOut[] | null;
+}
+
+// ── NL Search ─────────────────────────────────────────
+
+export interface NLSearchResponse extends MessageSearchResponse {
+  generated_query: Record<string, unknown>;
+  explanation: string;
+}

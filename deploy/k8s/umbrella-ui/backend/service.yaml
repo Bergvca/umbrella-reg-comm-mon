@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: umbrella-ui-backend
+  namespace: umbrella-ui
+  labels:
+    app: umbrella-ui-backend
+spec:
+  selector:
+    app: umbrella-ui-backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP
