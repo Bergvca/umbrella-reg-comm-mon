@@ -57,6 +57,28 @@ spec:
                   is_active  = true,
                   updated_at = now();
               "
+
+              # Seed second model if configured
+              if [ -n "$AGENT_MODEL_2_NAME" ]; then
+                NAME2=$(printf '%s' "$AGENT_MODEL_2_NAME"     | sed "s/'/''/g")
+                PROV2=$(printf '%s' "$AGENT_MODEL_2_PROVIDER" | sed "s/'/''/g")
+                MID2=$(printf '%s'  "$AGENT_MODEL_2_ID"       | sed "s/'/''/g")
+                BURL2=$(printf '%s' "$AGENT_MODEL_2_BASE_URL" | sed "s/'/''/g")
+                AKEY2=$(printf '%s' "$AZURE_KIMI_API_KEY"     | sed "s/'/''/g")
+
+                psql "$DB_URL" -c "
+                  INSERT INTO agent.models (name, provider, model_id, base_url, api_key_secret, is_active)
+                  VALUES ('$NAME2', '$PROV2', '$MID2', NULLIF('$BURL2', ''), NULLIF('$AKEY2', ''), true)
+                  ON CONFLICT (name) DO UPDATE SET
+                    provider       = EXCLUDED.provider,
+                    model_id       = EXCLUDED.model_id,
+                    base_url       = EXCLUDED.base_url,
+                    api_key_secret = EXCLUDED.api_key_secret,
+                    is_active      = true,
+                    updated_at     = now();
+                "
+              fi
+
               echo "Seed complete."
           envFrom:
             - secretRef:

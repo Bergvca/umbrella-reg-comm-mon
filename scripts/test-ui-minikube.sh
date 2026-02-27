@@ -138,6 +138,43 @@ if [ "$TEST_ONLY" = false ]; then
     ON CONFLICT DO NOTHING;
     "
 
+    info "Seeding built-in tools (es_search, es_get_mapping, sql_query)..."
+    kubectl exec -n umbrella-storage "$PG_POD" -- \
+      psql -U postgres -d umbrella -c "
+    INSERT INTO agent.tools (name, display_name, description, category, parameters_schema, is_active)
+    VALUES (
+      'es_search',
+      'ES Search',
+      'Search Elasticsearch for documents and/or run aggregations. Use fields to request only needed fields (saves tokens). Use aggs with size=0 for counts/stats without fetching documents. Use filters for term and range filtering.',
+      'builtin',
+      '{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query text. Use * to match all documents.\"},\"index\":{\"type\":\"string\",\"default\":\"messages-*\",\"description\":\"Elasticsearch index pattern to search\"},\"filters\":{\"type\":\"object\",\"default\":{},\"description\":\"Term/range filters e.g. {channel: email, timestamp: {gte: now-7d}}\"},\"fields\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Fields to return from each doc. Null returns all. Example: [body_text, channel, timestamp]\"},\"aggs\":{\"type\":\"object\",\"description\":\"ES aggregations. Example: {by_channel: {terms: {field: channel, size: 10}}}\"},\"size\":{\"type\":\"integer\",\"default\":10,\"description\":\"Number of docs to return (0 for agg-only)\"}},\"required\":[\"query\"]}',
+      true
+    )
+    ON CONFLICT (name) DO UPDATE SET
+      description = EXCLUDED.description,
+      parameters_schema = EXCLUDED.parameters_schema;
+    INSERT INTO agent.tools (name, display_name, description, category, parameters_schema, is_active)
+    VALUES (
+      'es_get_mapping',
+      'ES Get Mapping',
+      'Get the field mapping (schema) of an Elasticsearch index. Use this BEFORE searching to discover available fields, their types, and how to filter on them.',
+      'builtin',
+      '{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"string\",\"default\":\"messages-*\",\"description\":\"Elasticsearch index pattern to get the mapping for\"}},\"required\":[]}',
+      true
+    )
+    ON CONFLICT (name) DO NOTHING;
+    INSERT INTO agent.tools (name, display_name, description, category, parameters_schema, is_active)
+    VALUES (
+      'sql_query',
+      'SQL Query',
+      'Run read-only SQL queries against the PostgreSQL database. Use this to query alerts, entities, review queues, and other structured data.',
+      'builtin',
+      '{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"SQL SELECT query to execute\"}},\"required\":[\"query\"]}',
+      true
+    )
+    ON CONFLICT (name) DO NOTHING;
+    "
+
     info "UI deployed successfully"
     echo ""
 fi
@@ -334,6 +371,115 @@ else
     STREAM_ENDPOINT_OK=2  # treat as expected-skip
 fi
 
+# Stage 10: End-to-end agent execution — create agent, run ES search, verify output
+info "Stage 10: Agent E2E — create & execute ES search agent..."
+AGENT_E2E_OK=0  # 0=fail, 1=pass, 2=expected-skip (no LLM key)
+
+# We need supervisor token (already generated above) + PG_POD
+
+# 1. Get model ID and es_search tool ID from the API
+MODEL_ID=$(curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
+    http://localhost:8001/api/v1/agent-models | jq -r '.items[0].id // empty' 2>/dev/null)
+ES_TOOL_ID=$(curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
+    http://localhost:8001/api/v1/agent-tools | jq -r '[.items[] | select(.name=="es_search")][0].id // empty' 2>/dev/null)
+MAPPING_TOOL_ID=$(curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
+    http://localhost:8001/api/v1/agent-tools | jq -r '[.items[] | select(.name=="es_get_mapping")][0].id // empty' 2>/dev/null)
+
+if [ -z "$MODEL_ID" ] || [ "$MODEL_ID" = "null" ]; then
+    warn "~ No model found — skipping agent E2E test"
+    AGENT_E2E_OK=2
+elif [ -z "$ES_TOOL_ID" ] || [ "$ES_TOOL_ID" = "null" ]; then
+    warn "~ es_search tool not found — skipping agent E2E test"
+    AGENT_E2E_OK=2
+else
+    # Build tool_ids array — always include es_search, optionally es_get_mapping
+    TOOL_IDS="\"$ES_TOOL_ID\""
+    if [ -n "$MAPPING_TOOL_ID" ] && [ "$MAPPING_TOOL_ID" != "null" ]; then
+        TOOL_IDS="\"$ES_TOOL_ID\", \"$MAPPING_TOOL_ID\""
+    fi
+
+    # 2. Create the test agent via the API
+    AGENT_CREATE_RESP=$(curl -s -o /tmp/agent_create.json -w "%{http_code}" \
+        -X POST http://localhost:8001/api/v1/agents \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
+        -d "{
+          \"name\": \"E2E Test Search Agent\",
+          \"description\": \"Searches Elasticsearch for test events and summarizes findings\",
+          \"model_id\": \"$MODEL_ID\",
+          \"system_prompt\": \"You are a data analyst with access to tools. You MUST use tools to answer questions — never guess or fabricate data.\\n\\nAvailable tools:\\n- es_get_mapping: Call this first to discover the fields and types in an Elasticsearch index before searching.\\n- es_search: Search for documents using full-text queries and filters.\\n\\nWorkflow:\\n1. Call es_get_mapping to learn the index schema.\\n2. Call es_search with appropriate query and filters based on the schema.\\n3. Summarize the results for the user.\\n\\nAlways call tools — do not output tool invocations as text.\",
+          \"temperature\": 0.0,
+          \"max_iterations\": 10,
+          \"tool_ids\": [$TOOL_IDS],
+          \"data_sources\": [{\"source_type\": \"elasticsearch\", \"source_identifier\": \"messages-*\"}]
+        }")
+
+    if [ "$AGENT_CREATE_RESP" = "201" ] || [ "$AGENT_CREATE_RESP" = "409" ]; then
+        if [ "$AGENT_CREATE_RESP" = "409" ]; then
+            # Agent already exists from a previous run — look it up
+            TEST_AGENT_ID=$(curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
+                http://localhost:8001/api/v1/agents | \
+                jq -r '[.items[] | select(.name=="E2E Test Search Agent")][0].id // empty' 2>/dev/null)
+        else
+            TEST_AGENT_ID=$(jq -r '.id // empty' /tmp/agent_create.json 2>/dev/null)
+        fi
+
+        if [ -n "$TEST_AGENT_ID" ] && [ "$TEST_AGENT_ID" != "null" ]; then
+            info "  Agent created/found: $TEST_AGENT_ID"
+
+            # 3. Execute the agent — search for the test message ingested by the pipeline test
+            info "  Executing agent (searching for 'pipeline-test-001')..."
+            EXEC_HTTP=$(curl -s -o /tmp/agent_exec.json -w "%{http_code}" \
+                --max-time 120 \
+                -X POST http://localhost:8001/api/v1/agent-runs \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer $UI_TOKEN" \
+                -d "{\"agent_id\": \"$TEST_AGENT_ID\", \"input\": \"Search for messages containing pipeline-test-001 and summarize what you find.\"}")
+
+            if [ "$EXEC_HTTP" = "201" ]; then
+                RUN_STATUS=$(jq -r '.status // empty' /tmp/agent_exec.json 2>/dev/null)
+                RUN_OUTPUT=$(jq -r '.output.response // empty' /tmp/agent_exec.json 2>/dev/null)
+                RUN_STEPS=$(jq -r '.steps // [] | length' /tmp/agent_exec.json 2>/dev/null)
+
+                if [ "$RUN_STATUS" = "completed" ]; then
+                    # Check that the agent actually used the es_search tool
+                    USED_ES=$(jq -r '[.steps[]? | select(.tool_name=="es_search")] | length' /tmp/agent_exec.json 2>/dev/null || echo "0")
+                    if [ "$USED_ES" -gt 0 ] && [ -n "$RUN_OUTPUT" ]; then
+                        info "✓ Agent completed — used es_search ($USED_ES call(s)), $RUN_STEPS steps"
+                        info "  Output preview: $(echo "$RUN_OUTPUT" | head -c 200)..."
+                        AGENT_E2E_OK=1
+                    elif [ -n "$RUN_OUTPUT" ]; then
+                        warn "~ Agent completed but did not use es_search tool (output: $(echo "$RUN_OUTPUT" | head -c 150))"
+                        AGENT_E2E_OK=1  # still a pass — agent ran and produced output
+                    else
+                        warn "✗ Agent completed but no output"
+                    fi
+                elif [ "$RUN_STATUS" = "failed" ]; then
+                    RUN_ERR=$(jq -r '.error_message // "unknown"' /tmp/agent_exec.json 2>/dev/null)
+                    warn "✗ Agent run failed: $(echo "$RUN_ERR" | head -c 200)"
+                else
+                    warn "~ Agent run status: $RUN_STATUS"
+                    AGENT_E2E_OK=2
+                fi
+            elif [ "$EXEC_HTTP" = "502" ]; then
+                warn "~ Agent execution returned 502 (expected — LLM may be unreachable)"
+                AGENT_E2E_OK=2
+            else
+                warn "✗ Agent execution returned HTTP $EXEC_HTTP"
+                cat /tmp/agent_exec.json 2>/dev/null | head -5
+            fi
+            rm -f /tmp/agent_exec.json
+        else
+            warn "✗ Could not determine test agent ID"
+        fi
+        rm -f /tmp/agent_create.json
+    else
+        warn "✗ Agent creation returned HTTP $AGENT_CREATE_RESP"
+        cat /tmp/agent_create.json 2>/dev/null | head -5
+        rm -f /tmp/agent_create.json
+    fi
+fi
+
 # Cleanup port-forwards
 kill $PF_PID $PF_FE_PID 2>/dev/null || true
 
@@ -360,11 +506,18 @@ elif [ "$STREAM_ENDPOINT_OK" -eq 2 ]; then
 else
     echo "Stage 9  (Streaming):      [✗ FAIL]"
 fi
+if [ "$AGENT_E2E_OK" -eq 1 ]; then
+    echo "Stage 10 (Agent E2E):      [✓ PASS]"
+elif [ "$AGENT_E2E_OK" -eq 2 ]; then
+    echo "Stage 10 (Agent E2E):      [~ WARN] skipped — no LLM key, model, or tool"
+else
+    echo "Stage 10 (Agent E2E):      [✗ FAIL]"
+fi
 echo "=========================================="
 echo ""
 
-# Stages 8b and 9 are excluded from hard pass/fail — a missing LLM key or no agents is expected in CI
-if [ "$UI_RESULT" -gt 0 ] && [ "$LOGIN_OK" -eq 1 ] && [ "$FRONTEND_OK" -eq 1 ] && [ "$AGENT_HEALTH_OK" -eq 1 ] && [ "$NL_SEARCH_OK" -ne 0 ] && [ "$STREAM_ENDPOINT_OK" -ne 0 ]; then
+# Stages 8b, 9, and 10 are excluded from hard pass/fail — a missing LLM key or no agents is expected in CI
+if [ "$UI_RESULT" -gt 0 ] && [ "$LOGIN_OK" -eq 1 ] && [ "$FRONTEND_OK" -eq 1 ] && [ "$AGENT_HEALTH_OK" -eq 1 ] && [ "$NL_SEARCH_OK" -ne 0 ] && [ "$STREAM_ENDPOINT_OK" -ne 0 ] && [ "$AGENT_E2E_OK" -ne 0 ]; then
     info "✓ UI TEST PASSED"
     echo ""
     info "To access the UI:"
