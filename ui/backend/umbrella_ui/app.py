@@ -45,6 +45,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from umbrella_ui.routers.agent_models import router as agent_models_router
     from umbrella_ui.routers.agent_runs import router as agent_runs_router
     from umbrella_ui.routers.agent_tools import router as agent_tools_router
+    from umbrella_ui.routers.agents import ds_router as agent_ds_router
     from umbrella_ui.routers.agents import router as agents_router
     from umbrella_ui.routers.alert_generation import router as alert_generation_router
     from umbrella_ui.routers.alerts import router as alerts_router
@@ -78,6 +79,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(export_router)
     app.include_router(alert_generation_router)
     app.include_router(agents_router)
+    app.include_router(agent_ds_router)
     app.include_router(agent_runs_router)
     app.include_router(agent_models_router)
     app.include_router(agent_tools_router)

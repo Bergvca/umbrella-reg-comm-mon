@@ -98,10 +98,76 @@ async def test_es_search_with_filters():
 
     await tool._arun(query="test", filters={"channel": "email", "timestamp": {"gte": "now-1w"}})
     call_kwargs = es_mock.search.call_args
-    body = call_kwargs.kwargs.get("body") or call_kwargs[1]["body"]
-    filters = body["query"]["bool"]["filter"]
+    query_dsl = call_kwargs.kwargs.get("query")
+    filters = query_dsl["bool"]["filter"]
     assert any("term" in f for f in filters)
     assert any("range" in f for f in filters)
+
+
+@pytest.mark.asyncio
+async def test_es_search_with_field_selection():
+    """When fields are specified, only those fields should be in _source."""
+    es_mock = AsyncMock()
+    es_mock.search = AsyncMock(return_value={
+        "hits": {
+            "total": {"value": 1},
+            "hits": [{
+                "_id": "doc1", "_index": "messages-2024", "_score": 1.0,
+                "_source": {"channel": "email", "timestamp": "2024-01-01"},
+            }],
+        }
+    })
+    tool = _make_es_tool(es_client=es_mock)
+
+    result = json.loads(await tool._arun(
+        query="test", fields=["channel", "timestamp"],
+    ))
+    assert result["total"] == 1
+    # Verify _source filtering was requested
+    call_kwargs = es_mock.search.call_args.kwargs
+    assert call_kwargs["source"] == ["channel", "timestamp"]
+
+
+@pytest.mark.asyncio
+async def test_es_search_aggregation_only():
+    """With aggs and size=0, return aggregation results without documents."""
+    es_mock = AsyncMock()
+    es_mock.search = AsyncMock(return_value={
+        "hits": {"total": {"value": 42}, "hits": []},
+        "aggregations": {
+            "by_channel": {
+                "buckets": [
+                    {"key": "email", "doc_count": 30},
+                    {"key": "chat", "doc_count": 12},
+                ],
+            },
+        },
+    })
+    tool = _make_es_tool(es_client=es_mock)
+
+    result = json.loads(await tool._arun(
+        query="*",
+        aggs={"by_channel": {"terms": {"field": "channel", "size": 10}}},
+        size=0,
+    ))
+    assert result["total"] == 42
+    assert "results" not in result  # size=0 → no docs
+    assert result["aggregations"]["by_channel"]["buckets"][0]["key"] == "email"
+    assert result["aggregations"]["by_channel"]["buckets"][0]["doc_count"] == 30
+
+
+@pytest.mark.asyncio
+async def test_es_search_match_all():
+    """Query '*' should use match_all instead of multi_match."""
+    es_mock = AsyncMock()
+    es_mock.search = AsyncMock(return_value={"hits": {"total": {"value": 0}, "hits": []}})
+    tool = _make_es_tool(es_client=es_mock)
+
+    await tool._arun(query="*", size=0)
+    call_kwargs = es_mock.search.call_args.kwargs
+    assert call_kwargs["query"] == {"match_all": {}}
+    # match_all + size=0 should not include highlights
+    assert "highlight" not in call_kwargs
 
 
 # ── SQLQueryTool ─────────────────────────────────────────────────

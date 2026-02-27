@@ -7,6 +7,8 @@ import json
 import structlog
 from litellm import acompletion
 
+from umbrella_agents.tool_call_parser import _strip_think_tags
+
 logger = structlog.get_logger()
 
 TRANSLATE_SYSTEM_PROMPT = """\
@@ -80,9 +82,7 @@ async def translate_nl_to_es_query(
 
     # Reasoning models (e.g. DeepSeek-V3) emit a <think>...</think> block
     # before the actual JSON output.  Strip it so json.loads doesn't choke.
-    think_end = content.rfind("</think>")
-    if think_end != -1:
-        content = content[think_end + len("</think>"):].strip()
+    content = _strip_think_tags(content)
 
     result = json.loads(content)
 

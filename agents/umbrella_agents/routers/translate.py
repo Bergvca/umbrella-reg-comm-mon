@@ -6,6 +6,7 @@ import structlog
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
 
+from umbrella_agents.executor import _ensure_model_registered
 from umbrella_agents.model_router import translate_nl_to_es_query
 
 logger = structlog.get_logger()
@@ -55,9 +56,8 @@ async def translate_query(body: TranslateRequest, request: Request):
             result = await session.execute(stmt)
             model_row = result.scalar_one_or_none()
             if model_row:
-                model_str = f"{model_row.provider}/{model_row.model_id}"
+                model_str = _ensure_model_registered(model_row)
                 base_url = model_row.base_url
-                # api_key_secret is a K8s secret ref — in production, resolve from env
     except Exception:
         logger.warning("model_db_lookup_failed", exc_info=True)
 

@@ -7,6 +7,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 
+import litellm
 import structlog
 from elasticsearch import AsyncElasticsearch
 from langchain_litellm import ChatLiteLLM
@@ -17,10 +18,61 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from umbrella_agents.callbacks.audit import AuditCallbackHandler
 from umbrella_agents.callbacks.streaming import StreamingAuditCallback
-from umbrella_agents.db.models import Agent, AgentDataSource, Run
+from umbrella_agents.db.models import Agent, AgentDataSource, Model, Run
+from umbrella_agents.tool_call_parser import TextToolCallingWrapper
 from umbrella_agents.tools.registry import DataSourceScope, get_registry
 
 logger = structlog.get_logger()
+
+# Models already registered with litellm (avoid repeated calls).
+_registered_models: set[str] = set()
+
+# Preamble prepended to every agent's system prompt so the LLM understands
+# that tools are real, live, and must be invoked via function calling — not
+# simulated or output as text.
+_TOOL_PREAMBLE = """\
+You have access to real, live tools that are connected to production systems. \
+When you use a tool, it will be executed automatically and the real results \
+will be returned to you. Do NOT simulate, fabricate, or imagine tool results. \
+Do NOT output tool calls as text — use the function calling mechanism provided. \
+You are NOT in a simulation. Every tool call you make will run against real \
+databases and return real data. Always call tools when you need data instead \
+of guessing.
+
+"""
+
+
+def _ensure_model_registered(model_config: Model) -> str:
+    """Register a model with litellm so it knows the model supports tool calling.
+
+    LiteLLM maintains an internal registry of known models and their
+    capabilities.  Custom or self-hosted deployments (e.g. DeepSeek on Azure)
+    are unknown to litellm, which causes ``supports_function_calling()`` to
+    return False and silently strips the ``tools`` parameter from API
+    requests.  This function registers the model once so tool calling works.
+    """
+    model_str = f"{model_config.provider}/{model_config.model_id}"
+    if model_str in _registered_models:
+        return model_str
+
+    if not litellm.supports_function_calling(model=model_str):
+        litellm.register_model({
+            model_str: {
+                "max_tokens": model_config.max_tokens,
+                "input_cost_per_token": 0.0,
+                "output_cost_per_token": 0.0,
+                "litellm_provider": model_config.provider,
+                "mode": "chat",
+                "supports_function_calling": True,
+            }
+        })
+        logger.info(
+            "registered_model_for_tool_calling",
+            model=model_str,
+        )
+
+    _registered_models.add(model_str)
+    return model_str
 
 
 async def load_agent_config(
@@ -100,14 +152,19 @@ async def execute_agent(
         tool_configs=tool_configs,
     )
 
-    # 4. Build LLM
+    # 4. Build LLM (wrapped to handle text-based tool calls)
     model_config = agent_config.model
-    llm = ChatLiteLLM(
-        model=f"{model_config.provider}/{model_config.model_id}",
-        temperature=float(agent_config.temperature),
-        max_tokens=model_config.max_tokens,
-        api_base=model_config.base_url,
-    )
+    model_str = _ensure_model_registered(model_config)
+    llm_kwargs: dict[str, Any] = {
+        "model": model_str,
+        "temperature": float(agent_config.temperature),
+        "max_tokens": model_config.max_tokens,
+        "api_base": model_config.base_url,
+    }
+    if isinstance(model_config.api_key_secret, str) and model_config.api_key_secret:
+        llm_kwargs["api_key"] = model_config.api_key_secret
+    base_llm = ChatLiteLLM(**llm_kwargs)
+    llm = TextToolCallingWrapper(delegate=base_llm)
 
     # 5. Build LangGraph ReAct agent
     audit_callback = AuditCallbackHandler(run_id=run_id, session_factory=session_factory)
@@ -120,9 +177,10 @@ async def execute_agent(
     error_message = None
 
     try:
+        system_prompt = _TOOL_PREAMBLE + agent_config.system_prompt
         result = await graph.ainvoke(
             {"messages": [
-                SystemMessage(content=agent_config.system_prompt),
+                SystemMessage(content=system_prompt),
                 HumanMessage(content=user_input),
             ]},
             config={"callbacks": [audit_callback], "recursion_limit": agent_config.max_iterations * 2},
@@ -235,14 +293,19 @@ async def execute_agent_streaming(
             tool_configs=tool_configs,
         )
 
-        # 4. Build LLM
+        # 4. Build LLM (wrapped to handle text-based tool calls)
         model_config = agent_config.model
-        llm = ChatLiteLLM(
-            model=f"{model_config.provider}/{model_config.model_id}",
-            temperature=float(agent_config.temperature),
-            max_tokens=model_config.max_tokens,
-            api_base=model_config.base_url,
-        )
+        model_str = _ensure_model_registered(model_config)
+        llm_kwargs: dict[str, Any] = {
+            "model": model_str,
+            "temperature": float(agent_config.temperature),
+            "max_tokens": model_config.max_tokens,
+            "api_base": model_config.base_url,
+        }
+        if isinstance(model_config.api_key_secret, str) and model_config.api_key_secret:
+            llm_kwargs["api_key"] = model_config.api_key_secret
+        base_llm = ChatLiteLLM(**llm_kwargs)
+        llm = TextToolCallingWrapper(delegate=base_llm)
 
         # 5. Build LangGraph ReAct agent with streaming callback
         streaming_callback = StreamingAuditCallback(
@@ -262,9 +325,10 @@ async def execute_agent_streaming(
             if cancelled.is_set():
                 status = "cancelled"
             else:
+                system_prompt = _TOOL_PREAMBLE + agent_config.system_prompt
                 result = await graph.ainvoke(
                     {"messages": [
-                        SystemMessage(content=agent_config.system_prompt),
+                        SystemMessage(content=system_prompt),
                         HumanMessage(content=user_input),
                     ]},
                     config={

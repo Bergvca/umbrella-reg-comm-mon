@@ -12,7 +12,13 @@ import pytest
 from langchain_litellm import ChatLiteLLM
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from umbrella_agents.executor import _build_scope, execute_agent, execute_agent_streaming
+from umbrella_agents.executor import (
+    _build_scope,
+    _ensure_model_registered,
+    _registered_models,
+    execute_agent,
+    execute_agent_streaming,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +123,71 @@ def test_chat_litellm_is_langchain_runnable():
 
     llm = ChatLiteLLM(model="openai/gpt-4o")
     assert isinstance(llm, Runnable)
+
+
+# ---------------------------------------------------------------------------
+# _ensure_model_registered
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_model_registered_unknown_model():
+    """Unknown models should be registered with litellm for tool calling."""
+    import litellm
+
+    model = MagicMock()
+    model.provider = "azure"
+    model.model_id = "test-unknown-model-12345"
+    model.max_tokens = 4096
+
+    # Clean up from previous runs
+    model_str = "azure/test-unknown-model-12345"
+    _registered_models.discard(model_str)
+
+    # Before registration, litellm doesn't know this model
+    assert not litellm.supports_function_calling(model=model_str)
+
+    result = _ensure_model_registered(model)
+
+    assert result == model_str
+    assert litellm.supports_function_calling(model=model_str)
+    assert model_str in _registered_models
+
+
+def test_ensure_model_registered_known_model():
+    """Known models (e.g. openai/gpt-4o) should be left as-is."""
+    import litellm
+
+    model = MagicMock()
+    model.provider = "openai"
+    model.model_id = "gpt-4o"
+    model.max_tokens = 4096
+
+    model_str = "openai/gpt-4o"
+    _registered_models.discard(model_str)
+
+    # gpt-4o already supports function calling
+    assert litellm.supports_function_calling(model=model_str)
+
+    result = _ensure_model_registered(model)
+
+    assert result == model_str
+    assert model_str in _registered_models
+
+
+def test_ensure_model_registered_idempotent():
+    """Calling _ensure_model_registered twice should not error."""
+    model = MagicMock()
+    model.provider = "azure"
+    model.model_id = "test-idempotent-model"
+    model.max_tokens = 2048
+
+    model_str = "azure/test-idempotent-model"
+    _registered_models.discard(model_str)
+
+    _ensure_model_registered(model)
+    _ensure_model_registered(model)  # should not raise
+
+    assert model_str in _registered_models
 
 
 # ---------------------------------------------------------------------------
