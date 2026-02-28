@@ -15,3 +15,12 @@ Umbrella is built to help financial institutions meet stringent recordkeeping an
 ## The "Off-Channel" Challenge
 
 Recent enforcement actions by the SEC and CFTC have resulted in billions of dollars in fines for firms failing to capture "off-channel" communications (such as WhatsApp, Signal, or personal SMS). Umbrella addresses this by providing a unified connector framework that can ingest data from any source, ensuring that all business conduct—regardless of the platform—is captured, indexed, and supervised.
+
+## AI-Powered Compliance & Supervision
+
+Umbrella’s **AI Analytics Layer** is specifically designed to transform this raw ingested data into actionable regulatory intelligence, helping firms move beyond simple archiving to proactive supervision.
+
+*   **Automated Review (Comms Reviewer)**: To meet **FINRA 3110** and **SEC 17a-4** supervision requirements, Umbrella uses specialized AI agents to perform first-pass reviews of flagged communications. These agents draft dispositions with cited evidence, significantly reducing the manual burden on compliance officers.
+*   **Voice Capture & Analysis**: For **CFTC 1.31** and **MiFID II (Article 16(7))**, which require recording oral communications, Umbrella’s transcription service converts calls and recordings into searchable text. Integrated speaker diarization ensures that every participant’s contributions are clearly identified and indexed.
+*   **Proactive Risk Detection**: Umbrella applies **Anomaly Detection** and **NLP Enrichment** to surface suspicious patterns that traditional lexicon-based systems might miss. This is critical for complying with the **Market Abuse Regulation (MAR)** and **Federal Reserve** expectations for detecting market manipulation and insider trading.
+*   **Cross-Channel Entity Resolution**: The platform links disparate identities—such as a personal WhatsApp number, a Teams ID, and a corporate email—into a unified **Entity Profile**. This ensures that "off-channel" communications are not reviewed in isolation but are correlated with a person's entire behavioral footprint, closing the gap in supervision that regulators have recently targeted.
