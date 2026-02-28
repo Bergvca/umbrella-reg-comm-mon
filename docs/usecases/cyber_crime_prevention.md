@@ -6,7 +6,7 @@ Umbrella's unified data ingestion and AI-powered analytics provide a robust defe
 
 ### 1. Phishing & Social Engineering Detection
 Phishing attacks often involve subtle manipulation and may span multiple platforms (e.g., an initial email followed by a WhatsApp message).
-- **Cross-Channel Correlation**: Umbrella links identities across email, Teams, and personal messaging apps, allowing security teams to see the full scope of a phishing campaign.
+- **Cross-Channel Correlation**: Umbrella links identities across email, Teams, personal messaging apps, and **application logs** (e.g., VPN logins, portal access). This allows security teams to correlate a suspicious communication with subsequent unusual login activity, revealing the full scope of a phishing campaign.
 - **NLP & Sentiment Analysis**: The AI layer analyzes the tone and content of messages to identify common phishing tactics, such as urgent requests for sensitive information or suspicious links, even when they're disguised.
 
 ### 2. Business Email Compromise (BEC)
