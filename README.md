@@ -31,6 +31,7 @@ While the data ingestion pipeline is domain-agnostic, Umbrella ships with purpos
 
 - **Regulatory Communications Monitoring** — eComm/aComm capture and compliance review for financial institutions
 - **Trade Surveillance** — detecting market abuse, insider trading, and suspicious trading patterns
+- **Cyber Crime Prevention** — detecting and preventing phishing, Business Email Compromise (BEC), and data leakage
 - **Social Media Monitoring** — tracking brand sentiment, misinformation, and behavioral signals across platforms
 - **Call Centre Analytics** — analyzing customer interactions for quality, compliance, and behavioral trends
 - **Internal Communications Monitoring** — detecting policy violations, data leakage, and conduct risk
