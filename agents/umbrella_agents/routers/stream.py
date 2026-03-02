@@ -50,7 +50,7 @@ async def stream_run(run_id: uuid.UUID, request: Request):
 
                 yield {
                     "event": event["event"],
-                    "data": json.dumps(event["data"]),
+                    "data": json.dumps(event["data"], default=str),
                 }
         except asyncio.CancelledError:
             pass

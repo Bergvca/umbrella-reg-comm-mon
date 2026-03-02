@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -52,8 +53,8 @@ function RunCard({ run, isActive }: { run: PlaygroundRun; isActive: boolean }) {
             >
               Agent
             </Badge>
-            <div className="text-sm prose prose-sm dark:prose-invert max-w-none">
-              <Markdown>{run.output}</Markdown>
+            <div className="text-sm prose prose-sm max-w-none prose-p:text-foreground prose-headings:text-foreground prose-strong:text-foreground prose-li:text-foreground prose-td:text-foreground prose-th:text-foreground prose-table:w-full prose-table:border-collapse prose-td:border prose-td:border-border prose-td:px-3 prose-td:py-1.5 prose-th:border prose-th:border-border prose-th:px-3 prose-th:py-1.5 prose-th:bg-muted prose-th:font-semibold">
+              <Markdown remarkPlugins={[remarkGfm]}>{run.output}</Markdown>
             </div>
           </div>
         )}

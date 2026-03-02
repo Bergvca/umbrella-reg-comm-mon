@@ -121,6 +121,27 @@ spec:
                 "
               fi
 
+              # Seed fifth model if configured (Claude Sonnet 4.6 via OpenRouter)
+              if [ -n "$AGENT_MODEL_5_NAME" ]; then
+                NAME5=$(printf '%s' "$AGENT_MODEL_5_NAME"     | sed "s/'/''/g")
+                PROV5=$(printf '%s' "$AGENT_MODEL_5_PROVIDER" | sed "s/'/''/g")
+                MID5=$(printf '%s'  "$AGENT_MODEL_5_ID"       | sed "s/'/''/g")
+                BURL5=$(printf '%s' "$AGENT_MODEL_5_BASE_URL" | sed "s/'/''/g")
+                AKEY5=$(printf '%s' "$OPENROUTER_API_KEY"     | sed "s/'/''/g")
+
+                psql "$DB_URL" -c "
+                  INSERT INTO agent.models (name, provider, model_id, base_url, api_key_secret, is_active)
+                  VALUES ('$NAME5', '$PROV5', '$MID5', NULLIF('$BURL5', ''), NULLIF('$AKEY5', ''), true)
+                  ON CONFLICT (name) DO UPDATE SET
+                    provider       = EXCLUDED.provider,
+                    model_id       = EXCLUDED.model_id,
+                    base_url       = EXCLUDED.base_url,
+                    api_key_secret = EXCLUDED.api_key_secret,
+                    is_active      = true,
+                    updated_at     = now();
+                "
+              fi
+
               echo "Seed complete."
           envFrom:
             - secretRef:

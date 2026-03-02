@@ -132,7 +132,8 @@ class StreamingAuditCallback(AsyncCallbackHandler):
         if hasattr(response, "llm_output") and response.llm_output:
             usage = response.llm_output.get("token_usage")
             if usage:
-                token_usage = dict(usage)
+                import json as _json
+                token_usage = _json.loads(_json.dumps(dict(usage), default=str))
 
         output_text = ""
         if response.generations:

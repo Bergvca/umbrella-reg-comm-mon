@@ -2,3 +2,4 @@
 mdpdf.log
 __pycache__/
 test_emails/
+**/secret.yaml

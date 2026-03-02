@@ -123,7 +123,16 @@ class TextToolCallingWrapper(BaseChatModel):
         if msg.tool_calls:
             return msg
 
-        text = msg.content or ""
+        raw_content = msg.content or ""
+        if isinstance(raw_content, list):
+            # Multi-part content (e.g. text + tool-use blocks from some models).
+            # Extract only the text parts for tool-call parsing.
+            text = " ".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in raw_content
+            )
+        else:
+            text = raw_content
         clean_text = _strip_think_tags(text)
         calls = _extract_text_tool_calls(clean_text, self.known_tool_names)
 
