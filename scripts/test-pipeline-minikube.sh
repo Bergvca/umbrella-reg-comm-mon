@@ -141,8 +141,18 @@ info "All roles and seed data applied."
 echo ""
 
 # ─── Step 3: Wait for services to stabilise ───────────────────────────────────
-info "Waiting 10 seconds for services to stabilize..."
-sleep 10
+info "Waiting for mailserver SMTP to be ready (up to 60s)..."
+for attempt in $(seq 1 12); do
+    if kubectl exec -n umbrella-connectors deploy/mailserver -- \
+        sh -c 'echo QUIT | nc -w 2 localhost 25 2>/dev/null | grep -q 220' 2>/dev/null; then
+        info "Mailserver SMTP is ready (after $((attempt * 5))s)"
+        break
+    fi
+    if [ "$attempt" -eq 12 ]; then
+        warn "Mailserver SMTP not ready after 60s — continuing anyway"
+    fi
+    sleep 5
+done
 
 # ─── Step 4: Send test email via SMTP ─────────────────────────────────────────
 info "Sending test email via SMTP..."
