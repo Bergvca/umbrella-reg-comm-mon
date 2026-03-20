@@ -67,6 +67,14 @@ for dep in "statefulset/kafka:umbrella-streaming" "statefulset/elasticsearch:umb
     fi
 done
 
+# Source .env if present (loads OPENROUTER_API_KEY, etc.)
+if [ -f "$REPO_ROOT/.env" ]; then
+    info "Loading .env file..."
+    set -a
+    source "$REPO_ROOT/.env"
+    set +a
+fi
+
 # Point Docker to minikube
 eval $(minikube docker-env)
 
@@ -208,6 +216,19 @@ if [ "$TEST_ONLY" = false ]; then
     kubectl apply -f deploy/k8s/umbrella-ui/backend/
     kubectl apply -f deploy/k8s/umbrella-ui/frontend/
     kubectl apply -f deploy/k8s/umbrella-ui/agents/
+
+    # Inject OPENROUTER_API_KEY from .env into the K8s secret (if set)
+    if [ -n "$OPENROUTER_API_KEY" ]; then
+        info "Patching agent runtime secret with OPENROUTER_API_KEY from .env..."
+        kubectl get secret umbrella-agent-runtime-credentials -n umbrella-ui -o json \
+            | jq --arg k "$(echo -n "$OPENROUTER_API_KEY" | base64 -w0)" \
+                  '.data.OPENROUTER_API_KEY = $k' \
+            | kubectl apply -f -
+    else
+        warn "OPENROUTER_API_KEY not set — agents will not have LLM access."
+        warn "Copy .env.example to .env and add your OpenRouter key."
+    fi
+
     kubectl apply -f deploy/k8s/umbrella-ui/ingress.yaml
 
     # Force pod restart to pick up new images

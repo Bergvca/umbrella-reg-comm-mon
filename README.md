@@ -245,48 +245,52 @@ A centralized gateway that normalizes incoming parsed data into a unified schema
 
 ## Getting Started
 
-### OpenRouter API Key (LLM Access)
+### 1. Set up your OpenRouter API key
 
 The AI agent layer uses [OpenRouter](https://openrouter.ai/) to route LLM requests to models like Claude, Gemini, and others. You need an API key for agents to work.
 
-1. **Create an account** at [openrouter.ai](https://openrouter.ai/) and generate an API key from the [Keys page](https://openrouter.ai/keys).
+1. Create an account at [openrouter.ai](https://openrouter.ai/) and generate an API key from the [Keys page](https://openrouter.ai/keys).
 
-2. **Load the key into PostgreSQL.** The agent runtime reads API keys from the `agent.models` table. The seed migration (`V11`) inserts a placeholder — update it with your real key:
-
-   ```sql
-   UPDATE agent.models
-   SET    api_key_secret = 'sk-or-v1-YOUR_KEY_HERE'
-   WHERE  base_url = 'https://openrouter.ai/api/v1';
-   ```
-
-   This updates all OpenRouter-backed models in one statement.
-
-3. **Load the key into the Kubernetes secret** (if running on K8s). The agent runtime deployment also reads the key from a secret:
+2. Copy the example env file and add your key:
 
    ```bash
-   # Encode the key
-   KEY_B64=$(echo -n 'sk-or-v1-YOUR_KEY_HERE' | base64 -w0)
-
-   # Patch the secret
-   kubectl get secret umbrella-agent-runtime-credentials -n umbrella-ui -o json \
-     | jq --arg k "$KEY_B64" '.data.OPENROUTER_API_KEY = $k' \
-     | kubectl apply -f -
-
-   # Restart the agent runtime to pick up the new secret
-   kubectl rollout restart deployment/umbrella-agent-runtime -n umbrella-ui
+   cp .env.example .env
    ```
 
-4. **Verify the key works:**
+   Edit `.env` and set your key:
 
-   ```bash
-   curl -s https://openrouter.ai/api/v1/chat/completions \
-     -H "Authorization: Bearer sk-or-v1-YOUR_KEY_HERE" \
-     -H "Content-Type: application/json" \
-     -d '{"model":"anthropic/claude-sonnet-4-6","messages":[{"role":"user","content":"ping"}],"max_tokens":5}' \
-     | jq .choices[0].message.content
+   ```
+   OPENROUTER_API_KEY=sk-or-v1-your-key-here
    ```
 
-   If you get a response (e.g. `"Pong!"`), the key is valid. A `401` error means the key is expired or invalid.
+The deploy and test scripts automatically source `.env` and propagate the key to both the Kubernetes secret and PostgreSQL (via the agent model seed job).
+
+### 2. Deploy and test
+
+```bash
+# Deploy the full cluster to minikube (Kafka, PostgreSQL, Elasticsearch, UI, etc.)
+./scripts/deploy-minikube.sh
+
+# Run the end-to-end pipeline test (DB roles, seed data, 13-stage verification)
+./scripts/test-pipeline-minikube.sh
+
+# Rebuild and test the UI + agent runtime (also seeds the OpenRouter key)
+./scripts/test-ui-minikube.sh
+```
+
+`test-ui-minikube.sh` reads `OPENROUTER_API_KEY` from `.env`, patches the Kubernetes secret, and runs the agent model seed job which writes the key into PostgreSQL. After it completes, agents can call LLMs.
+
+### Verify your key manually (optional)
+
+```bash
+curl -s https://openrouter.ai/api/v1/chat/completions \
+  -H "Authorization: Bearer $(grep OPENROUTER_API_KEY .env | cut -d= -f2)" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"anthropic/claude-sonnet-4-6","messages":[{"role":"user","content":"ping"}],"max_tokens":5}' \
+  | jq .choices[0].message.content
+```
+
+A response like `"Pong!"` means the key is valid. A `401` error means it's expired or invalid.
 
 ## Development Setup
 

@@ -37,6 +37,14 @@ info()  { printf "${GREEN}[INFO]${NC} %s\n" "$1"; }
 warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
 error() { printf "${RED}[ERROR]${NC} %s\n" "$1"; }
 
+# Source .env if present (loads OPENROUTER_API_KEY, etc.)
+if [ -f "$REPO_ROOT/.env" ]; then
+    info "Loading .env file..."
+    set -a
+    source "$REPO_ROOT/.env"
+    set +a
+fi
+
 # 1. Start minikube (if not running)
 info "Checking minikube status..."
 if ! minikube status &>/dev/null; then
