@@ -10,14 +10,37 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import text
+
 from umbrella_ui.auth.rbac import require_role
 from umbrella_ui.db.models.alert import Alert
 from umbrella_ui.db.models.policy import Policy, Rule
 from umbrella_ui.deps import get_alert_session, get_es
-from umbrella_ui.es.models import AlertStats, AlertStatsBucket, AlertTimePoint, ESMessage
+from umbrella_ui.es.models import AlertStats, AlertStatsBucket, AlertTimePoint, ESMessage, ESTrade
 from umbrella_ui.es.queries import build_batch_fetch_messages
-from umbrella_ui.schemas.alert import AlertOut, AlertStatusUpdate, AlertWithMessage
+from umbrella_ui.schemas.alert import AlertOut, AlertStatusUpdate, AlertWithMessage, LinkedEntity
 from umbrella_ui.schemas.common import PaginatedResponse
+
+
+async def _fetch_linked_entities(
+    session: AsyncSession, alert_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, list[LinkedEntity]]:
+    """Batch-fetch linked entities for a list of alert IDs."""
+    if not alert_ids:
+        return {}
+    sql = text("""
+        SELECT ae.alert_id, e.id AS entity_id, e.display_name
+        FROM alert.alert_entities ae
+        JOIN entity.entities e ON e.id = ae.entity_id
+        WHERE ae.alert_id = ANY(:alert_ids)
+    """)
+    result = await session.execute(sql, {"alert_ids": alert_ids})
+    mapping: dict[uuid.UUID, list[LinkedEntity]] = {}
+    for row in result.all():
+        mapping.setdefault(row.alert_id, []).append(
+            LinkedEntity(entity_id=str(row.entity_id), display_name=row.display_name)
+        )
+    return mapping
 
 router = APIRouter(prefix="/api/v1/alerts", tags=["alerts"])
 
@@ -80,6 +103,43 @@ async def get_alert_stats(
     )
 
 
+@router.get("/by-document", response_model=list[AlertOut])
+async def get_alerts_for_document(
+    session: Annotated[AsyncSession, Depends(get_alert_session)],
+    _user: Annotated[dict, Depends(require_role("reviewer"))],
+    es_index: str = Query(...),
+    es_document_id: str = Query(...),
+):
+    """Return all alerts linked to a specific ES document."""
+    stmt = (
+        select(Alert, Rule.name.label("rule_name"), Policy.name.label("policy_name"))
+        .join(Rule, Alert.rule_id == Rule.id)
+        .join(Policy, Rule.policy_id == Policy.id)
+        .where(Alert.es_index == es_index, Alert.es_document_id == es_document_id)
+        .order_by(Alert.created_at.desc())
+    )
+    rows = (await session.execute(stmt)).all()
+    alert_ids = [a.id for a, _, _ in rows]
+    entity_map = await _fetch_linked_entities(session, alert_ids)
+    return [
+        AlertOut(
+            id=a.id,
+            name=a.name,
+            rule_id=a.rule_id,
+            rule_name=rule_name,
+            policy_name=policy_name,
+            es_index=a.es_index,
+            es_document_id=a.es_document_id,
+            es_document_ts=a.es_document_ts,
+            severity=a.severity,
+            status=a.status,
+            created_at=a.created_at,
+            linked_entities=entity_map.get(a.id, []),
+        )
+        for a, rule_name, policy_name in rows
+    ]
+
+
 @router.get("", response_model=PaginatedResponse[AlertOut])
 async def list_alerts(
     session: Annotated[AsyncSession, Depends(get_alert_session)],
@@ -121,6 +181,9 @@ async def list_alerts(
         except Exception:
             pass
 
+    alert_ids = [a.id for a in alerts]
+    entity_map = await _fetch_linked_entities(session, alert_ids)
+
     items = [
         AlertOut(
             id=a.id,
@@ -132,6 +195,7 @@ async def list_alerts(
             severity=a.severity,
             status=a.status,
             created_at=a.created_at,
+            linked_entities=entity_map.get(a.id, []),
         )
         for a in alerts
     ]
@@ -160,11 +224,18 @@ async def get_alert(
     alert, rule_name, policy_name = row
 
     message: ESMessage | None = None
+    trade: ESTrade | None = None
+    is_trade = alert.es_index.startswith("trades-")
     try:
         es_doc = await es.get(index=alert.es_index, id=alert.es_document_id)
-        message = ESMessage.model_validate(es_doc["_source"])
+        if is_trade:
+            trade = ESTrade.model_validate(es_doc["_source"])
+        else:
+            message = ESMessage.model_validate(es_doc["_source"])
     except NotFoundError:
         pass
+
+    entity_map = await _fetch_linked_entities(session, [alert.id])
 
     return AlertWithMessage(
         id=alert.id,
@@ -179,6 +250,8 @@ async def get_alert(
         rule_name=rule_name,
         policy_name=policy_name,
         message=message,
+        trade=trade,
+        linked_entities=entity_map.get(alert.id, []),
     )
 
 

@@ -11,6 +11,8 @@ class ESParticipant(BaseModel):
     id: str
     name: str
     role: str
+    entity_id: str | None = None
+    entity_name: str | None = None
 
 
 class ESAttachment(BaseModel):
@@ -55,6 +57,44 @@ class ESMessageHit(BaseModel):
     index: str
     score: float | None = None
     highlights: dict[str, list[str]] = {}
+
+
+class ESTradeMetadata(BaseModel):
+    """Typed trade metadata fields from the ``trades-*`` index."""
+
+    ticker: str | None = None
+    side: str | None = None
+    quantity: float | None = None
+    price: float | None = None
+    notional: float | None = None
+    currency: str | None = None
+    order_type: str | None = None
+    venue: str | None = None
+    execution_id: str | None = None
+    asset_class: str | None = None
+    account_id: str | None = None
+    settlement_date: str | None = None
+    order_id: str | None = None
+
+
+class ESTrade(BaseModel):
+    """A trade document from the ``trades-*`` index."""
+
+    message_id: str
+    channel: str = "trade_data"
+    direction: str | None = None
+    timestamp: datetime
+    participants: list[ESParticipant] = []
+    body_text: str | None = None
+    metadata: ESTradeMetadata = ESTradeMetadata()
+
+
+class ESTradeHit(BaseModel):
+    """A single trade search hit."""
+
+    trade: ESTrade
+    index: str
+    score: float | None = None
 
 
 class ESAlert(BaseModel):

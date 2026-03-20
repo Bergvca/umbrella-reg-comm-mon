@@ -13,6 +13,7 @@ export const CHANNELS = [
     "bloomberg_chat",
     "bloomberg_email",
     "unigy_turret",
+    "trade_data",
 ];
 export const ROLES = {
     ADMIN: "admin",

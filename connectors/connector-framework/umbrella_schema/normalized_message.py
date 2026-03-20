@@ -18,6 +18,7 @@ class Channel(str, Enum):
     BLOOMBERG_CHAT = "bloomberg_chat"
     BLOOMBERG_EMAIL = "bloomberg_email"
     EMAIL = "email"
+    TRADE_DATA = "trade_data"
 
 
 class Direction(str, Enum):

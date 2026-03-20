@@ -11,10 +11,14 @@ import structlog
 import uvicorn
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 
+from umbrella_schema import Channel
+
 from .config import IngestionConfig
+from .event_id import EventIdGenerator
 from .health import create_health_app
 from .normalizers.email import EmailNormalizer
 from .normalizers.registry import NormalizerRegistry
+from .normalizers.trade_data import TradeDataNormalizer
 from .percolator import AlertPercolator
 from .resolver import EntityResolver
 from .s3 import NormalizedS3Store
@@ -28,8 +32,10 @@ class IngestionService:
     def __init__(self, config: IngestionConfig) -> None:
         self._config = config
         self._s3 = NormalizedS3Store(config.s3)
+        self._event_id = EventIdGenerator(config.event_id_config)
         self._registry = NormalizerRegistry()
         self._registry.register(EmailNormalizer(config.monitored_domains))
+        self._registry.register(TradeDataNormalizer())
 
         self._resolver: EntityResolver | None = None
         if config.entity.dsn:
@@ -160,6 +166,7 @@ class IngestionService:
                 normalized = normalizer.normalize(raw_message)
                 if self._resolver:
                     normalized = await self._resolver.resolve(normalized)
+                normalized.message_id = self._event_id.generate(normalized)
                 await self._dual_write(normalized)
                 self._messages_processed += 1
                 await self._consumer.commit()
@@ -183,11 +190,12 @@ class IngestionService:
         # 1. Kafka
         value = normalized.model_dump_json().encode("utf-8")
         key = normalized.message_id.encode("utf-8")
-        await self._producer.send_and_wait(
-            self._config.kafka.output_topic,
-            value=value,
-            key=key,
+        topic = (
+            self._config.kafka.trades_output_topic
+            if normalized.channel == Channel.TRADE_DATA
+            else self._config.kafka.output_topic
         )
+        await self._producer.send_and_wait(topic, value=value, key=key)
 
         # 2. S3
         s3_uri = await self._s3.store(normalized)
@@ -209,14 +217,26 @@ class IngestionService:
                 "timestamp": normalized.timestamp.isoformat(),
                 "body_text": normalized.body_text,
                 "participants": [
-                    {"id": p.id, "name": p.name, "role": p.role}
+                    {
+                        "id": p.id, "name": p.name, "role": p.role,
+                        **({"entity_id": p.entity_id} if p.entity_id else {}),
+                        **({"entity_name": p.entity_name} if p.entity_name else {}),
+                    }
                     for p in normalized.participants
                 ],
                 "metadata": normalized.metadata,
             }
-            es_index = f"messages-{normalized.timestamp:%Y.%m}"
+            entity_ids = list({
+                p.entity_id for p in normalized.participants
+                if p.entity_id
+            })
+            if normalized.channel == Channel.TRADE_DATA:
+                es_index = f"trades-{normalized.timestamp:%Y.%m}"
+            else:
+                es_index = f"messages-{normalized.timestamp:%Y.%m}"
             await self._percolator.percolate(
-                normalized.message_id, es_index, doc, normalized.timestamp
+                normalized.message_id, es_index, doc, normalized.timestamp,
+                entity_ids=entity_ids or None,
             )
 
     # ------------------------------------------------------------------

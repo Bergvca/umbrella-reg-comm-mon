@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import structlog
 from litellm import acompletion
@@ -10,6 +11,9 @@ from litellm import acompletion
 from umbrella_agents.tool_call_parser import _strip_think_tags
 
 logger = structlog.get_logger()
+
+# Providers known to support response_format: {"type": "json_object"}
+_JSON_MODE_PROVIDERS = {"openai", "anthropic", "azure", "together_ai", "groq"}
 
 TRANSLATE_SYSTEM_PROMPT = """\
 You are an Elasticsearch query translator. You convert natural language search \
@@ -61,6 +65,7 @@ async def translate_nl_to_es_query(
         f"Field schema:\n{json.dumps(field_schema, indent=2)}"
     )
 
+    provider = model.split("/")[0] if "/" in model else ""
     kwargs: dict = {
         "model": model,
         "messages": [
@@ -68,8 +73,9 @@ async def translate_nl_to_es_query(
             {"role": "user", "content": user_message},
         ],
         "temperature": 0.0,
-        "response_format": {"type": "json_object"},
     }
+    if provider in _JSON_MODE_PROVIDERS:
+        kwargs["response_format"] = {"type": "json_object"}
     if api_key:
         kwargs["api_key"] = api_key
     if base_url:
@@ -83,6 +89,10 @@ async def translate_nl_to_es_query(
     # Reasoning models (e.g. DeepSeek-V3) emit a <think>...</think> block
     # before the actual JSON output.  Strip it so json.loads doesn't choke.
     content = _strip_think_tags(content)
+
+    # Strip markdown fences if the model wrapped its response in ```json ... ```
+    content = re.sub(r"^```(?:json)?\s*\n?", "", content.strip())
+    content = re.sub(r"\n?```\s*$", "", content.strip())
 
     result = json.loads(content)
 

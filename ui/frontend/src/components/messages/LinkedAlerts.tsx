@@ -21,7 +21,14 @@ export function LinkedAlerts({ alerts }: LinkedAlertsProps) {
           className="flex items-center gap-3 border rounded-lg p-3 hover:bg-muted/50 transition-colors"
         >
           <AlertSeverityBadge severity={alert.severity} />
-          <span className="flex-1 text-sm font-medium">{alert.name}</span>
+          <div className="flex-1 min-w-0">
+            <span className="text-sm font-medium block truncate">{alert.name}</span>
+            {(alert.policy_name || alert.rule_name) && (
+              <span className="text-xs text-muted-foreground block truncate">
+                {[alert.policy_name, alert.rule_name].filter(Boolean).join(" → ")}
+              </span>
+            )}
+          </div>
           <AlertStatusBadge status={alert.status} />
         </Link>
       ))}

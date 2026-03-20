@@ -1,4 +1,5 @@
 {
+  "index_patterns": ["messages-*"],
   "template": {
     "settings": {
       "number_of_shards": 1,
@@ -35,6 +36,12 @@
               }
             },
             "role": {
+              "type": "keyword"
+            },
+            "entity_id": {
+              "type": "keyword"
+            },
+            "entity_name": {
               "type": "keyword"
             }
           }

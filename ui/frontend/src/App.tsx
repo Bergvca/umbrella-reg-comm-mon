@@ -17,6 +17,8 @@ import { AgentsPage } from "@/pages/AgentsPage";
 import { AgentDetailPage } from "@/pages/AgentDetailPage";
 import { AgentEditorPage } from "@/pages/AgentEditorPage";
 import { AgentPlaygroundPage } from "@/pages/AgentPlaygroundPage";
+import { TradesPage } from "@/pages/TradesPage";
+import { TradeDetailPage } from "@/pages/TradeDetailPage";
 import { AdminPage } from "@/pages/AdminPage";
 import { AuditPage } from "@/pages/AuditPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
@@ -59,6 +61,10 @@ export function App() {
           <Route path="/messages" element={<MessagesPage />} />
           <Route path="/messages/:index/:docId" element={<MessageDetailPage />} />
           <Route path="/policies" element={<PoliciesPage />} />
+
+          {/* Trades */}
+          <Route path="/trades" element={<TradesPage />} />
+          <Route path="/trades/:index/:docId" element={<TradeDetailPage />} />
 
           {/* Entity resolution */}
           <Route path="/entities" element={<EntitiesPage />} />

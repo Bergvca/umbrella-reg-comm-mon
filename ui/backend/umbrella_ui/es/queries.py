@@ -90,6 +90,151 @@ def build_message_search(
     return body
 
 
+def build_trade_search(
+    *,
+    q: str | None = None,
+    ticker: str | None = None,
+    side: str | None = None,
+    participant: str | None = None,
+    venue: str | None = None,
+    account_id: str | None = None,
+    quantity_min: float | None = None,
+    quantity_max: float | None = None,
+    price_min: float | None = None,
+    price_max: float | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    offset: int = 0,
+    limit: int = 20,
+) -> dict:
+    """Build an ES query for ``trades-*``."""
+    must: list[dict] = []
+    filters: list[dict] = []
+
+    if q:
+        must.append({
+            "multi_match": {
+                "query": q,
+                "fields": ["body_text", "metadata.ticker"],
+                "type": "best_fields",
+            }
+        })
+
+    if ticker:
+        filters.append({"term": {"metadata.ticker": ticker.upper()}})
+
+    if side:
+        filters.append({"term": {"metadata.side": side.lower()}})
+
+    if venue:
+        filters.append({"term": {"metadata.venue": venue}})
+
+    if account_id:
+        filters.append({"term": {"metadata.account_id": account_id}})
+
+    if participant:
+        filters.append({
+            "nested": {
+                "path": "participants",
+                "query": {
+                    "multi_match": {
+                        "query": participant,
+                        "fields": ["participants.name", "participants.id"],
+                    }
+                },
+            }
+        })
+
+    if quantity_min is not None or quantity_max is not None:
+        range_q: dict = {}
+        if quantity_min is not None:
+            range_q["gte"] = quantity_min
+        if quantity_max is not None:
+            range_q["lte"] = quantity_max
+        filters.append({"range": {"metadata.quantity": range_q}})
+
+    if price_min is not None or price_max is not None:
+        range_q = {}
+        if price_min is not None:
+            range_q["gte"] = price_min
+        if price_max is not None:
+            range_q["lte"] = price_max
+        filters.append({"range": {"metadata.price": range_q}})
+
+    if date_from or date_to:
+        range_q = {}
+        if date_from:
+            range_q["gte"] = date_from.isoformat()
+        if date_to:
+            range_q["lte"] = date_to.isoformat()
+        filters.append({"range": {"timestamp": range_q}})
+
+    body: dict = {
+        "query": {
+            "bool": {
+                "must": must or [{"match_all": {}}],
+                "filter": filters,
+            }
+        },
+        "sort": [{"timestamp": {"order": "desc"}}],
+        "from": offset,
+        "size": limit,
+    }
+
+    return body
+
+
+def build_trade_stats(
+    *,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    participant: str | None = None,
+) -> dict:
+    """Build an ES aggregation query for trade statistics."""
+    filters: list[dict] = []
+
+    if date_from or date_to:
+        range_q: dict = {}
+        if date_from:
+            range_q["gte"] = date_from.isoformat()
+        if date_to:
+            range_q["lte"] = date_to.isoformat()
+        filters.append({"range": {"timestamp": range_q}})
+
+    if participant:
+        filters.append({
+            "nested": {
+                "path": "participants",
+                "query": {
+                    "multi_match": {
+                        "query": participant,
+                        "fields": ["participants.name", "participants.id"],
+                    }
+                },
+            }
+        })
+
+    body: dict = {
+        "size": 0,
+        "aggs": {
+            "by_ticker": {
+                "terms": {"field": "metadata.ticker", "size": 50},
+                "aggs": {
+                    "total_quantity": {"sum": {"field": "metadata.quantity"}},
+                    "total_notional": {"sum": {"field": "metadata.notional"}},
+                },
+            },
+            "by_side": {"terms": {"field": "metadata.side"}},
+            "by_venue": {"terms": {"field": "metadata.venue"}},
+        },
+    }
+
+    if filters:
+        body["query"] = {"bool": {"filter": filters}}
+
+    return body
+
+
 def build_alert_stats(
     *,
     date_from: datetime | None = None,

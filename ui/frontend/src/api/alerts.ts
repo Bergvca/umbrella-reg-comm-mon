@@ -25,6 +25,17 @@ export async function getAlerts(
   return apiFetch<PaginatedResponse<AlertOut>>(`/alerts?${searchParams.toString()}`);
 }
 
+export async function getAlertsForDocument(
+  esIndex: string,
+  esDocumentId: string,
+): Promise<AlertOut[]> {
+  const params = new URLSearchParams({
+    es_index: esIndex,
+    es_document_id: esDocumentId,
+  });
+  return apiFetch<AlertOut[]>(`/alerts/by-document?${params.toString()}`);
+}
+
 export async function getAlert(id: string): Promise<AlertWithMessage> {
   return apiFetch<AlertWithMessage>(`/alerts/${id}`);
 }

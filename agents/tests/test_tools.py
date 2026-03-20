@@ -1,12 +1,14 @@
-"""Tests for the tool catalog: es_search and sql_query."""
+"""Tests for the tool catalog: es_search, sql_query, alert_lookup."""
 
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from umbrella_agents.tools.alert_lookup import AlertLookupTool
 from umbrella_agents.tools.es_search import ESSearchTool
 from umbrella_agents.tools.registry import DataSourceScope, ToolRegistry
 from umbrella_agents.tools.sql_query import SQLQueryTool
@@ -199,7 +201,7 @@ async def test_sql_query_rejects_multi_statement():
 
 @pytest.mark.asyncio
 async def test_sql_query_allows_select():
-    session_mock = AsyncMock()
+    conn_mock = AsyncMock()
 
     async def _execute(stmt):
         result = MagicMock()
@@ -207,7 +209,10 @@ async def test_sql_query_allows_select():
         result.fetchall.return_value = [("uuid1", "Alice"), ("uuid2", "Bob")]
         return result
 
-    session_mock.execute = _execute
+    conn_mock.execute = _execute
+
+    session_mock = AsyncMock()
+    session_mock.connection = AsyncMock(return_value=conn_mock)
 
     from contextlib import asynccontextmanager
 
@@ -261,3 +266,161 @@ def test_registry_ignores_unknown_tools():
         session_factory=AsyncMock(),
     )
     assert tools == []
+
+
+# ── AlertLookupTool ─────────────────────────────────────────────
+
+
+def _make_alert_session_factory(rows, columns=None):
+    """Build a mock session_factory that returns the given rows from a query."""
+    if columns is None:
+        columns = ["id", "name", "severity", "status", "channel",
+                    "es_index", "es_document_id", "created_at",
+                    "rule_name", "policy_name"]
+
+    conn_mock = AsyncMock()
+    call_count = 0
+
+    async def _execute(stmt, params=None):
+        nonlocal call_count
+        call_count += 1
+        result = MagicMock()
+        # First call is SET TRANSACTION READ ONLY, second is the actual query
+        if call_count <= 1:
+            return result
+        result.keys.return_value = columns
+        result.fetchall.return_value = rows
+        return result
+
+    conn_mock.execute = _execute
+
+    session_mock = AsyncMock()
+    session_mock.connection = AsyncMock(return_value=conn_mock)
+
+    @asynccontextmanager
+    async def factory():
+        yield session_mock
+
+    return factory
+
+
+def _make_alert_tool(session_factory=None, es_client=None, scope=None):
+    return AlertLookupTool(
+        scope=scope or _make_scope(),
+        es_client=es_client,
+        session_factory=session_factory or AsyncMock(),
+        tool_config={},
+    )
+
+
+_SAMPLE_ALERT_ROW = (
+    "alert-uuid-1", "Insider trading pattern", "high", "open", "email",
+    "messages-2025.01", "doc-abc", "2025-01-15T10:00:00",
+    "Suspicious keyword match", "Market Abuse Policy",
+)
+
+
+@pytest.mark.asyncio
+async def test_alert_lookup_returns_alerts():
+    factory = _make_alert_session_factory([_SAMPLE_ALERT_ROW])
+    tool = _make_alert_tool(session_factory=factory)
+
+    result = json.loads(await tool._arun(policy_name="Market Abuse", fetch_events=False))
+    assert result["total"] == 1
+    alert = result["alerts"][0]
+    assert alert["alert_id"] == "alert-uuid-1"
+    assert alert["policy_name"] == "Market Abuse Policy"
+    assert alert["severity"] == "high"
+    assert alert["link"] == "/messages/messages-2025.01/doc-abc"
+
+
+@pytest.mark.asyncio
+async def test_alert_lookup_no_results():
+    factory = _make_alert_session_factory([])
+    tool = _make_alert_tool(session_factory=factory)
+
+    result = json.loads(await tool._arun(severity="critical", fetch_events=False))
+    assert result["total"] == 0
+    assert result["alerts"] == []
+
+
+@pytest.mark.asyncio
+async def test_alert_lookup_fetches_events():
+    factory = _make_alert_session_factory([_SAMPLE_ALERT_ROW])
+
+    es_mock = AsyncMock()
+    es_mock.mget = AsyncMock(return_value={
+        "docs": [{
+            "_index": "messages-2025.01",
+            "_id": "doc-abc",
+            "found": True,
+            "_source": {
+                "body_text": "Buy 10k shares before announcement",
+                "channel": "email",
+                "timestamp": "2025-01-15T09:30:00Z",
+            },
+        }],
+    })
+
+    tool = _make_alert_tool(session_factory=factory, es_client=es_mock)
+    result = json.loads(await tool._arun(fetch_events=True))
+
+    assert result["total"] == 1
+    alert = result["alerts"][0]
+    assert "event" in alert
+    assert alert["event"]["body_text"] == "Buy 10k shares before announcement"
+    es_mock.mget.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_alert_lookup_with_event_fields():
+    factory = _make_alert_session_factory([_SAMPLE_ALERT_ROW])
+
+    es_mock = AsyncMock()
+    es_mock.mget = AsyncMock(return_value={
+        "docs": [{
+            "_index": "messages-2025.01",
+            "_id": "doc-abc",
+            "found": True,
+            "_source": {"body_text": "content"},
+        }],
+    })
+
+    tool = _make_alert_tool(session_factory=factory, es_client=es_mock)
+    await tool._arun(fetch_events=True, event_fields=["body_text"])
+
+    call_kwargs = es_mock.mget.call_args.kwargs
+    assert call_kwargs["source_includes"] == ["body_text"]
+
+
+@pytest.mark.asyncio
+async def test_alert_lookup_continues_on_es_failure():
+    """If ES fails, alerts should still be returned without events."""
+    factory = _make_alert_session_factory([_SAMPLE_ALERT_ROW])
+
+    es_mock = AsyncMock()
+    es_mock.mget = AsyncMock(side_effect=Exception("ES down"))
+
+    tool = _make_alert_tool(session_factory=factory, es_client=es_mock)
+    result = json.loads(await tool._arun(fetch_events=True))
+
+    assert result["total"] == 1
+    assert "event" not in result["alerts"][0]
+
+
+@pytest.mark.asyncio
+async def test_alert_lookup_pg_failure():
+    """If PG query fails, return error."""
+    conn_mock = AsyncMock()
+    conn_mock.execute = AsyncMock(side_effect=Exception("connection refused"))
+
+    session_mock = AsyncMock()
+    session_mock.connection = AsyncMock(return_value=conn_mock)
+
+    @asynccontextmanager
+    async def factory():
+        yield session_mock
+
+    tool = _make_alert_tool(session_factory=factory)
+    result = json.loads(await tool._arun(fetch_events=False))
+    assert "error" in result

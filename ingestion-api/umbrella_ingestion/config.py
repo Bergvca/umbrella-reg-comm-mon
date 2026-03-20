@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings
+
+_DEFAULT_EVENT_ID_CONFIG = Path(__file__).resolve().parent / "event_id_config.yml"
 
 
 class KafkaConsumerConfig(BaseSettings):
@@ -22,6 +26,10 @@ class KafkaConsumerConfig(BaseSettings):
     output_topic: str = Field(
         default="normalized-messages",
         description="Kafka topic to publish normalized messages to",
+    )
+    trades_output_topic: str = Field(
+        default="normalized-trades",
+        description="Kafka topic to publish normalized trade messages to",
     )
     consumer_group: str = Field(
         default="ingestion-normalizer",
@@ -124,6 +132,10 @@ class IngestionConfig(BaseSettings):
     monitored_domains: list[str] = Field(
         default_factory=list,
         description="Email domains owned by the organization (for direction detection)",
+    )
+    event_id_config: Path = Field(
+        default=_DEFAULT_EVENT_ID_CONFIG,
+        description="Path to YAML config defining fields used for event ID hashing",
     )
     kafka: KafkaConsumerConfig = Field(default_factory=KafkaConsumerConfig)
     s3: S3Config = Field(default_factory=S3Config)

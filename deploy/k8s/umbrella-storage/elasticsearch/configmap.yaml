@@ -17,6 +17,11 @@ data:
     path.data: /usr/share/elasticsearch/data
     path.logs: /usr/share/elasticsearch/logs
 
+    # Relaxed disk watermarks for single-node dev clusters
+    cluster.routing.allocation.disk.watermark.low: 92%
+    cluster.routing.allocation.disk.watermark.high: 95%
+    cluster.routing.allocation.disk.watermark.flood_stage: 98%
+
   messages-template.json: |
     {
       "template": {
@@ -37,7 +42,9 @@ data:
               "properties": {
                 "id": {"type": "keyword"},
                 "name": {"type": "text","fields": {"keyword": {"type": "keyword"}}},
-                "role": {"type": "keyword"}
+                "role": {"type": "keyword"},
+                "entity_id": {"type": "keyword"},
+                "entity_name": {"type": "keyword"}
               }
             },
             "body_text": {"type": "text","analyzer": "standard"},

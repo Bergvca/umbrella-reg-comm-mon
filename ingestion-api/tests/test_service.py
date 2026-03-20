@@ -184,6 +184,123 @@ class TestDualWrite:
         service._s3.store.assert_awaited_once_with(normalized)
 
 
+class TestDualWriteTopicRouting:
+    """Verify that trade messages are routed to the trades output topic."""
+
+    @pytest.mark.asyncio
+    async def test_trade_message_routed_to_trades_topic(self, service: IngestionService):
+        from umbrella_ingestion.normalizers.trade_data import TradeDataNormalizer
+
+        normalizer = TradeDataNormalizer()
+        parsed_trade = {
+            "channel": "trade_data",
+            "message_id": "TRADE-001",
+            "ticker": "AAPL",
+            "side": "buy",
+            "quantity": 100,
+            "price": 150.00,
+            "venue": "NYSE",
+            "execution_id": "EX-001",
+            "timestamp": "2025-06-01T12:00:00Z",
+            "trader": {"id": "trader-1", "name": "Test Trader"},
+            "counterparty": {"id": "cp-1", "name": "Test Counterparty"},
+        }
+        normalized = normalizer.normalize(parsed_trade)
+
+        service._producer = AsyncMock()
+        service._producer.send_and_wait = AsyncMock()
+        service._s3 = AsyncMock()
+        service._s3.store = AsyncMock(return_value="s3://bucket/k")
+
+        await service._dual_write(normalized)
+
+        call_args = service._producer.send_and_wait.call_args
+        assert call_args[0][0] == "normalized-trades"
+
+    @pytest.mark.asyncio
+    async def test_email_message_routed_to_default_topic(self, service: IngestionService):
+        from umbrella_ingestion.normalizers.email import EmailNormalizer
+
+        normalizer = EmailNormalizer(monitored_domains=["acme.com"])
+        parsed = make_parsed_email(
+            from_address="external@gmail.com",
+            to=["user@acme.com"],
+        )
+        normalized = normalizer.normalize(parsed)
+
+        service._producer = AsyncMock()
+        service._producer.send_and_wait = AsyncMock()
+        service._s3 = AsyncMock()
+        service._s3.store = AsyncMock(return_value="s3://bucket/k")
+
+        await service._dual_write(normalized)
+
+        call_args = service._producer.send_and_wait.call_args
+        assert call_args[0][0] == "normalized-messages"
+
+
+class TestDualWritePercolatorEsIndex:
+    """Verify that percolator uses the correct ES index based on channel."""
+
+    @pytest.mark.asyncio
+    async def test_trade_percolator_uses_trades_index(self, service: IngestionService):
+        from umbrella_ingestion.normalizers.trade_data import TradeDataNormalizer
+
+        normalizer = TradeDataNormalizer()
+        parsed_trade = {
+            "channel": "trade_data",
+            "message_id": "TRADE-002",
+            "ticker": "TSLA",
+            "side": "sell",
+            "quantity": 50,
+            "price": 200.00,
+            "venue": "NASDAQ",
+            "execution_id": "EX-002",
+            "timestamp": "2025-06-01T14:00:00Z",
+            "trader": {"id": "trader-1", "name": "Test Trader"},
+        }
+        normalized = normalizer.normalize(parsed_trade)
+
+        mock_percolator = AsyncMock()
+        mock_percolator.percolate = AsyncMock(return_value=0)
+        service._percolator = mock_percolator
+
+        service._producer = AsyncMock()
+        service._producer.send_and_wait = AsyncMock()
+        service._s3 = AsyncMock()
+        service._s3.store = AsyncMock(return_value="s3://bucket/k")
+
+        await service._dual_write(normalized)
+
+        call_args = mock_percolator.percolate.call_args[0]
+        assert call_args[1] == f"trades-{normalized.timestamp:%Y.%m}"
+
+    @pytest.mark.asyncio
+    async def test_email_percolator_uses_messages_index(self, service: IngestionService):
+        from umbrella_ingestion.normalizers.email import EmailNormalizer
+
+        normalizer = EmailNormalizer(monitored_domains=["acme.com"])
+        parsed = make_parsed_email(
+            from_address="external@gmail.com",
+            to=["user@acme.com"],
+        )
+        normalized = normalizer.normalize(parsed)
+
+        mock_percolator = AsyncMock()
+        mock_percolator.percolate = AsyncMock(return_value=0)
+        service._percolator = mock_percolator
+
+        service._producer = AsyncMock()
+        service._producer.send_and_wait = AsyncMock()
+        service._s3 = AsyncMock()
+        service._s3.store = AsyncMock(return_value="s3://bucket/k")
+
+        await service._dual_write(normalized)
+
+        call_args = mock_percolator.percolate.call_args[0]
+        assert call_args[1] == f"messages-{normalized.timestamp:%Y.%m}"
+
+
 class TestConsumeLoopDeserializeErrors:
     @pytest.mark.asyncio
     async def test_invalid_utf8_increments_failed(self, service: IngestionService):

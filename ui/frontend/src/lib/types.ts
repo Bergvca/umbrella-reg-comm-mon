@@ -35,6 +35,11 @@ export interface PaginatedResponse<T> {
 export type Severity = "low" | "medium" | "high" | "critical";
 export type AlertStatus = "open" | "in_review" | "closed";
 
+export interface LinkedEntity {
+  entity_id: string;
+  display_name: string;
+}
+
 export interface AlertOut {
   id: string;
   name: string;
@@ -47,10 +52,12 @@ export interface AlertOut {
   severity: Severity;
   status: AlertStatus;
   created_at: string;
+  linked_entities: LinkedEntity[];
 }
 
 export interface AlertWithMessage extends AlertOut {
   message?: ESMessage;
+  trade?: TradeRecord;
 }
 
 // ── Alert Stats (Dashboard) ───────────────────────────
@@ -113,6 +120,34 @@ export interface ESMessage {
   risk_score?: number;
   matched_policies: string[];
   processing_status?: string;
+}
+
+// ── Trades ───────────────────────────────────────────
+
+export interface TradeMetadata {
+  ticker?: string;
+  side?: string;
+  quantity?: number;
+  price?: number;
+  notional?: number;
+  currency?: string;
+  order_type?: string;
+  venue?: string;
+  execution_id?: string;
+  asset_class?: string;
+  account_id?: string;
+  settlement_date?: string;
+  order_id?: string;
+}
+
+export interface TradeRecord {
+  message_id: string;
+  channel: string;
+  direction?: string;
+  timestamp: string;
+  participants: Participant[];
+  body_text?: string;
+  metadata: TradeMetadata;
 }
 
 // ── Decisions ─────────────────────────────────────────

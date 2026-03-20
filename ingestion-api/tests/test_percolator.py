@@ -30,9 +30,21 @@ def _make_percolator(
     return perc
 
 
-def _make_pool_mock(execute_return="INSERT 0 1"):
-    """Build a mock asyncpg pool that returns a given status from execute."""
+def _make_pool_mock(execute_return="INSERT 0 1", *, inserted=True, alert_id=None):
+    """Build a mock asyncpg pool.
+
+    When ``inserted`` is True, ``fetchrow`` returns a row with the alert id
+    (simulating RETURNING id).  When False it returns None (ON CONFLICT
+    DO NOTHING).
+    """
     conn_mock = AsyncMock()
+
+    if inserted:
+        _alert_id = alert_id or uuid.uuid4()
+        conn_mock.fetchrow = AsyncMock(return_value={"id": _alert_id})
+    else:
+        conn_mock.fetchrow = AsyncMock(return_value=None)
+
     conn_mock.execute = AsyncMock(return_value=execute_return)
 
     pool_mock = MagicMock()
@@ -101,8 +113,8 @@ class TestPercolateHappyPath:
         created = await perc.percolate("msg-1", "messages-2025.06", doc, ts)
 
         assert created == 1
-        conn_mock.execute.assert_awaited_once()
-        call_args = conn_mock.execute.call_args[0]
+        conn_mock.fetchrow.assert_awaited_once()
+        call_args = conn_mock.fetchrow.call_args[0]
         assert call_args[1] == "Insider Trading"  # rule_name
         assert call_args[2] == rule_id              # rule_id UUID
         assert call_args[3] == "messages-2025.06"   # es_index
@@ -127,17 +139,17 @@ class TestPercolateHappyPath:
         created = await perc.percolate("msg-1", "messages-2025.06", {}, ts)
 
         assert created == 2
-        assert conn_mock.execute.await_count == 2
+        assert conn_mock.fetchrow.await_count == 2
 
     @pytest.mark.asyncio
     async def test_duplicate_insert_returns_zero_created(self):
-        """ON CONFLICT DO NOTHING → 'INSERT 0 0' → not counted."""
+        """ON CONFLICT DO NOTHING → fetchrow returns None → not counted."""
         es_mock = AsyncMock()
         es_mock.search = AsyncMock(return_value=_make_es_hits(
             _make_hit(rule_id=uuid.uuid4()),
         ))
 
-        pool_mock, conn_mock = _make_pool_mock("INSERT 0 0")
+        pool_mock, conn_mock = _make_pool_mock(inserted=False)
         perc = _make_percolator(es_mock=es_mock, pool_mock=pool_mock)
 
         created = await perc.percolate("msg-1", "messages-2025.06", {}, None)
@@ -189,7 +201,7 @@ class TestPercolateErrors:
 
         created = await perc.percolate("msg-1", "messages-2025.06", {}, None)
         assert created == 0
-        conn_mock.execute.assert_not_awaited()
+        conn_mock.fetchrow.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_missing_rule_id_skipped(self):
@@ -204,7 +216,7 @@ class TestPercolateErrors:
 
         created = await perc.percolate("msg-1", "messages-2025.06", {}, None)
         assert created == 0
-        conn_mock.execute.assert_not_awaited()
+        conn_mock.fetchrow.assert_not_awaited()
 
 
 # ── Timestamp handling ───────────────────────────────────────────
@@ -220,13 +232,13 @@ class TestPercolateTimestamp:
             _make_hit(rule_id=rule_id),
         ))
 
-        pool_mock, conn_mock = _make_pool_mock("INSERT 0 1")
+        pool_mock, conn_mock = _make_pool_mock()
         perc = _make_percolator(es_mock=es_mock, pool_mock=pool_mock)
 
         naive_ts = datetime(2025, 6, 1, 12, 0, 0)  # no tzinfo
         await perc.percolate("msg-1", "messages-2025.06", {}, naive_ts)
 
-        call_args = conn_mock.execute.call_args[0]
+        call_args = conn_mock.fetchrow.call_args[0]
         ts_passed = call_args[5]
         assert ts_passed.tzinfo == timezone.utc
         assert ts_passed.year == 2025
@@ -240,12 +252,12 @@ class TestPercolateTimestamp:
             _make_hit(rule_id=rule_id),
         ))
 
-        pool_mock, conn_mock = _make_pool_mock("INSERT 0 1")
+        pool_mock, conn_mock = _make_pool_mock()
         perc = _make_percolator(es_mock=es_mock, pool_mock=pool_mock)
 
         await perc.percolate("msg-1", "messages-2025.06", {}, None)
 
-        call_args = conn_mock.execute.call_args[0]
+        call_args = conn_mock.fetchrow.call_args[0]
         assert call_args[5] is None
 
     @pytest.mark.asyncio
@@ -257,13 +269,13 @@ class TestPercolateTimestamp:
             _make_hit(rule_id=rule_id),
         ))
 
-        pool_mock, conn_mock = _make_pool_mock("INSERT 0 1")
+        pool_mock, conn_mock = _make_pool_mock()
         perc = _make_percolator(es_mock=es_mock, pool_mock=pool_mock)
 
         aware_ts = datetime(2025, 6, 1, 12, 0, tzinfo=timezone.utc)
         await perc.percolate("msg-1", "messages-2025.06", {}, aware_ts)
 
-        call_args = conn_mock.execute.call_args[0]
+        call_args = conn_mock.fetchrow.call_args[0]
         assert call_args[5] is aware_ts
 
 
@@ -357,11 +369,11 @@ class TestPercolateQueryShape:
             {"_id": "h1", "_source": {"rule_id": str(rule_id)}},
         ))
 
-        pool_mock, conn_mock = _make_pool_mock("INSERT 0 1")
+        pool_mock, conn_mock = _make_pool_mock()
         perc = _make_percolator(es_mock=es_mock, pool_mock=pool_mock)
 
         await perc.percolate("msg-1", "messages-2025.06", {}, None)
 
-        call_args = conn_mock.execute.call_args[0]
+        call_args = conn_mock.fetchrow.call_args[0]
         assert call_args[1] == ""        # rule_name default
         assert call_args[6] == "medium"  # severity default

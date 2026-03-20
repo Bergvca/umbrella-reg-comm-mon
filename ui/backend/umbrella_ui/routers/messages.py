@@ -150,15 +150,18 @@ async def nl_search(
     """
     # 1. Call agent runtime to translate NL → ES query DSL
     translate_url = f"{settings.agents_base_url}/translate-query"
+    payload: dict = {
+        "natural_language_query": body.query,
+        "index_pattern": "messages-*",
+        "field_schema": DEFAULT_FIELD_SCHEMA,
+    }
+    if body.model_id:
+        payload["model_id"] = body.model_id
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 translate_url,
-                json={
-                    "natural_language_query": body.query,
-                    "index_pattern": "messages-*",
-                    "field_schema": DEFAULT_FIELD_SCHEMA,
-                },
+                json=payload,
             )
             resp.raise_for_status()
             translation = resp.json()
@@ -228,6 +231,9 @@ async def get_message(
     try:
         doc = await es.get(index=index, id=doc_id)
     except NotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+    except Exception:
+        logger.warning("get_message_es_error", index=index, doc_id=doc_id, exc_info=True)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
     return ESMessage.model_validate(doc["_source"])
 

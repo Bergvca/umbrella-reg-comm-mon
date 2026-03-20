@@ -10,10 +10,10 @@ export function useMessageSearch(params: MessageSearchParams) {
   });
 }
 
-export function useNLSearch(query: string, offset = 0, limit = 20) {
+export function useNLSearch(query: string, offset = 0, limit = 20, modelId?: string) {
   return useQuery({
-    queryKey: ["messages", "nl-search", query, offset, limit],
-    queryFn: () => nlSearchMessages({ query, offset, limit }),
+    queryKey: ["messages", "nl-search", query, offset, limit, modelId],
+    queryFn: () => nlSearchMessages({ query, model_id: modelId, offset, limit }),
     enabled: !!query,
   });
 }

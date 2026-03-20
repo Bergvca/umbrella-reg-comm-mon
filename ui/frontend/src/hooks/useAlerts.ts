@@ -3,6 +3,7 @@ import {
   getAlertStats,
   getAlerts,
   getAlert,
+  getAlertsForDocument,
   updateAlertStatus,
 } from "@/api/alerts";
 import type { AlertListParams } from "@/api/alerts";
@@ -19,6 +20,14 @@ export function useAlerts(params: AlertListParams) {
   return useQuery({
     queryKey: ["alerts", "list", params],
     queryFn: () => getAlerts(params),
+  });
+}
+
+export function useAlertsForDocument(esIndex: string, esDocumentId: string) {
+  return useQuery({
+    queryKey: ["alerts", "by-document", esIndex, esDocumentId],
+    queryFn: () => getAlertsForDocument(esIndex, esDocumentId),
+    enabled: !!esIndex && !!esDocumentId,
   });
 }
 

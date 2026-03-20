@@ -14,6 +14,13 @@ export async function getAlerts(params = {}) {
     searchParams.set("limit", String(params.limit ?? 50));
     return apiFetch(`/alerts?${searchParams.toString()}`);
 }
+export async function getAlertsForDocument(esIndex, esDocumentId) {
+    const params = new URLSearchParams({
+        es_index: esIndex,
+        es_document_id: esDocumentId,
+    });
+    return apiFetch(`/alerts/by-document?${params.toString()}`);
+}
 export async function getAlert(id) {
     return apiFetch(`/alerts/${id}`);
 }

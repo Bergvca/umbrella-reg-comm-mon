@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { Link } from "react-router";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { Participant } from "@/lib/types";
@@ -14,6 +15,15 @@ interface Props {
 }
 
 function ParticipantChip({ participant: p }: { participant: Participant }) {
+  const nameContent = (
+    <>
+      <span className="font-medium">{p.name}</span>
+      {p.id && p.id !== p.name && (
+        <span className="text-muted-foreground">({p.id})</span>
+      )}
+    </>
+  );
+
   return (
     <span className="inline-flex items-center gap-1.5 text-sm whitespace-nowrap">
       <Badge
@@ -22,9 +32,15 @@ function ParticipantChip({ participant: p }: { participant: Participant }) {
       >
         {p.role}
       </Badge>
-      <span className="font-medium">{p.name}</span>
-      {p.id && p.id !== p.name && (
-        <span className="text-muted-foreground">({p.id})</span>
+      {p.entity_id ? (
+        <Link
+          to={`/entities/${p.entity_id}`}
+          className="inline-flex items-center gap-1 underline decoration-dotted hover:decoration-solid"
+        >
+          {nameContent}
+        </Link>
+      ) : (
+        nameContent
       )}
     </span>
   );

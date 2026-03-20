@@ -39,6 +39,7 @@ export async function searchMessages(
 
 export async function nlSearchMessages(body: {
   query: string;
+  model_id?: string;
   offset?: number;
   limit?: number;
 }): Promise<NLSearchResponse> {

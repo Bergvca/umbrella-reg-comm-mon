@@ -24,6 +24,11 @@ data:
       pipeline.workers: 1
       pipeline.batch.size: 250
 
+    - pipeline.id: trades
+      path.config: "/usr/share/logstash/pipeline/trades.conf"
+      pipeline.workers: 1
+      pipeline.batch.size: 500
+
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -64,6 +69,11 @@ data:
 
       # Ensure message_id exists for document ID
       if ![message_id] {
+        drop {}
+      }
+
+      # Reject trade_data — trades belong in the trades pipeline
+      if [channel] == "trade_data" {
         drop {}
       }
     }
@@ -120,5 +130,50 @@ data:
         hosts => ["http://elasticsearch.umbrella-storage.svc:9200"]
         index => "alerts-%{[@metadata][index_suffix]}"
         document_id => "%{[alert_id]}"
+      }
+    }
+
+  trades.conf: |
+    input {
+      kafka {
+        bootstrap_servers => "kafka.umbrella-streaming.svc:9092"
+        topics => ["normalized-trades"]
+        group_id => "logstash-trades"
+        codec => "json"
+        decorate_events => "basic"
+        auto_offset_reset => "earliest"
+      }
+    }
+
+    filter {
+      date {
+        match => ["timestamp", "ISO8601"]
+        target => "@timestamp"
+      }
+
+      ruby {
+        code => '
+          t = event.get("@timestamp")&.time
+          if t
+            event.set("[@metadata][index_suffix]", t.strftime("%Y.%m"))
+          else
+            event.set("[@metadata][index_suffix]", Time.now.utc.strftime("%Y.%m"))
+          end
+        '
+      }
+
+      if ![message_id] {
+        drop {}
+      }
+    }
+
+    output {
+      elasticsearch {
+        hosts => ["http://elasticsearch.umbrella-storage.svc:9200"]
+        index => "trades-%{[@metadata][index_suffix]}"
+        document_id => "%{message_id}"
+        action => "update"
+        doc_as_upsert => true
+        retry_on_conflict => 3
       }
     }

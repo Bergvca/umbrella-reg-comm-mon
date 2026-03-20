@@ -8,7 +8,14 @@ from uuid import UUID
 
 from pydantic import BaseModel, model_validator
 
-from umbrella_ui.es.models import ESMessage
+from umbrella_ui.es.models import ESMessage, ESTrade
+
+
+class LinkedEntity(BaseModel):
+    """An entity linked to an alert via alert.alert_entities."""
+
+    entity_id: str
+    display_name: str
 
 
 class AlertOut(BaseModel):
@@ -18,20 +25,23 @@ class AlertOut(BaseModel):
     name: str
     rule_id: UUID
     rule_name: str | None = None
+    policy_name: str | None = None
     es_index: str
     es_document_id: str
     es_document_ts: datetime | None
     severity: str
     status: str
     created_at: datetime
+    linked_entities: list[LinkedEntity] = []
 
 
 class AlertWithMessage(AlertOut):
-    """Alert metadata merged with the linked ES message (for detail view)."""
+    """Alert metadata merged with the linked ES message or trade (for detail view)."""
 
     rule_name: str | None = None
     policy_name: str | None = None
     message: ESMessage | None = None
+    trade: ESTrade | None = None
 
 
 class AlertStatusUpdate(BaseModel):

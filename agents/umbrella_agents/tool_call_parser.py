@@ -59,6 +59,24 @@ def _extract_text_tool_calls(
     return calls
 
 
+def unwrap_response_text(content: str) -> str:
+    """Unwrap LLM content that is a JSON-encoded ``{"response": "..."}`` object.
+
+    Some models (e.g. MiniMax) return their final answer as a JSON string
+    with a ``response`` key instead of plain text.  This detects that pattern
+    and extracts the inner text so it isn't double-wrapped.
+    """
+    text = content.strip()
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict) and "response" in parsed and isinstance(parsed["response"], str):
+                return parsed["response"]
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return content
+
+
 def _strip_think_tags(text: str) -> str:
     """Remove <think>...</think> blocks from DeepSeek responses."""
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
@@ -110,7 +128,16 @@ class TextToolCallingWrapper(BaseChatModel):
         # Use ainvoke on the delegate so RunnableBinding merges kwargs
         # (e.g. tools) correctly.  ainvoke returns a BaseMessage, so we
         # wrap it back into a ChatResult.
-        response = await self.delegate.ainvoke(messages, **kwargs)
+        #
+        # Pass an empty callbacks list to prevent the delegate from firing
+        # its own on_llm_start / on_llm_end events.  Without this, every
+        # LLM call triggers callbacks twice (delegate + wrapper), which
+        # creates spurious "llm_call" steps in the streaming trace and
+        # shows raw text (e.g. JSON-wrapped responses from MiniMax) before
+        # the wrapper can post-process it.
+        response = await self.delegate.ainvoke(
+            messages, config={"callbacks": []},
+        )
         processed = self._post_process_message(response)
         return ChatResult(generations=[ChatGeneration(message=processed)])
 

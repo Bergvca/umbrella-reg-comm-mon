@@ -26,6 +26,13 @@ _INSERT_ALERT = """
     INSERT INTO alert.alerts (name, rule_id, es_index, es_document_id, es_document_ts, severity)
     VALUES ($1, $2, $3, $4, $5, $6)
     ON CONFLICT (rule_id, es_document_id) DO NOTHING
+    RETURNING id
+"""
+
+_INSERT_ALERT_ENTITY = """
+    INSERT INTO alert.alert_entities (alert_id, entity_id)
+    VALUES ($1, $2)
+    ON CONFLICT DO NOTHING
 """
 
 
@@ -72,6 +79,7 @@ class AlertPercolator:
         es_index: str,
         document: dict,
         document_ts: datetime | None,
+        entity_ids: list[str] | None = None,
     ) -> int:
         """Percolate a document against the alert rules index.
 
@@ -125,7 +133,7 @@ class AlertPercolator:
                 if ts and ts.tzinfo is None:
                     ts = ts.replace(tzinfo=timezone.utc)
 
-                result = await conn.execute(
+                row = await conn.fetchrow(
                     _INSERT_ALERT,
                     rule_name,
                     rule_id,
@@ -134,9 +142,19 @@ class AlertPercolator:
                     ts,
                     severity,
                 )
-                # result is a status tag like "INSERT 0 1" or "INSERT 0 0"
-                if result.endswith(" 1"):
+                if row is not None:
                     created += 1
+                    alert_id = row["id"]
+                    if entity_ids:
+                        for eid in entity_ids:
+                            try:
+                                await conn.execute(
+                                    _INSERT_ALERT_ENTITY,
+                                    alert_id,
+                                    UUID(eid),
+                                )
+                            except (ValueError, Exception):
+                                pass
 
         if created:
             logger.info(

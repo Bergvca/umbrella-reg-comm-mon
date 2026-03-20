@@ -7,8 +7,9 @@
 #   Stage 5 — API message search
 #   Stage 6 — login + auth
 #   Stage 7 — frontend serves SPA
-#   Stage 8 — agent runtime health + NL search (502 expected without LLM key)
+#   Stage 8 — agent runtime health, tool registry, NL search (502 expected without LLM key)
 #   Stage 9 — agent streaming endpoints (execute-stream, cancel)
+#   Stage 12 — trade data in Elasticsearch + trade search API
 #
 # Usage:
 #   ./scripts/test-ui-minikube.sh              # rebuild + redeploy + test
@@ -79,6 +80,126 @@ if [ "$SKIP_BUILD" = false ]; then
     echo ""
 fi
 
+# ── Migrations ────────────────────────────────────────────────────────────
+if [ "$TEST_ONLY" = false ]; then
+    info "Re-running PostgreSQL migrations (picks up any new versions)..."
+    kubectl delete job/postgresql-migrations -n umbrella-storage --ignore-not-found --wait=true
+    PG_POD=$(kubectl get pod -n umbrella-storage -l app=postgresql -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    if [ -n "$PG_POD" ]; then
+        kubectl exec -n umbrella-storage "$PG_POD" -- \
+            psql -U postgres -d umbrella -c \
+            "DELETE FROM public.flyway_schema_history WHERE success = false;" \
+            2>/dev/null || true
+    fi
+    kubectl apply -f deploy/k8s/umbrella-storage/postgresql/migration-job.yaml
+    kubectl wait --for=condition=complete job/postgresql-migrations -n umbrella-storage --timeout=120s \
+        || { error "Migration job failed"; kubectl logs -n umbrella-storage -l job-name=postgresql-migrations --tail=30; exit 1; }
+    info "Migrations up to date"
+    echo ""
+
+    info "Updating ES index templates and reindexing..."
+
+    # 1. Update the template first (so new indices get the right mapping)
+    kubectl delete job/elasticsearch-init-templates -n umbrella-storage --ignore-not-found --wait=true
+    kubectl apply -f deploy/k8s/umbrella-storage/elasticsearch/configmap.yaml
+    kubectl apply -f deploy/k8s/umbrella-storage/elasticsearch/job-init-templates.yaml
+    kubectl wait --for=condition=complete job/elasticsearch-init-templates -n umbrella-storage --timeout=60s \
+        || { warn "ES template init job did not complete"; }
+
+    # 2. Stop Logstash so it doesn't re-index stale data with the old mapping
+    kubectl scale deployment/logstash -n umbrella-storage --replicas=0 2>/dev/null || true
+    sleep 3
+
+    # 3. Delete old indices
+    ES_POD=$(kubectl get pod -n umbrella-storage -l app=elasticsearch -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    if [ -n "$ES_POD" ]; then
+        kubectl exec -n umbrella-storage "$ES_POD" -- \
+            curl -s -X DELETE "http://localhost:9200/messages-*" > /dev/null 2>&1 || true
+        kubectl exec -n umbrella-storage "$ES_POD" -- \
+            curl -s -X DELETE "http://localhost:9200/alerts-*" > /dev/null 2>&1 || true
+        info "Deleted old indices"
+
+        # 4. Verify the template is active with the correct mapping
+        TMPL_CHECK=$(kubectl exec -n umbrella-storage "$ES_POD" -- \
+            curl -s "http://localhost:9200/_index_template/messages-template" 2>/dev/null)
+        if echo "$TMPL_CHECK" | grep -q '"entity_id"'; then
+            info "Template verified — participants.entity_id present"
+        else
+            warn "Template may not have entity_id field — check configmap"
+        fi
+    fi
+
+    # 5. Restart Logstash
+    kubectl scale deployment/logstash -n umbrella-storage --replicas=1 2>/dev/null || true
+    kubectl rollout status deployment/logstash -n umbrella-storage --timeout=60s 2>/dev/null || true
+    info "ES reindex complete"
+    echo ""
+
+    # 6. Seed trade data in Elasticsearch
+    info "Seeding trade data in Elasticsearch..."
+    if [ -n "$ES_POD" ]; then
+        # Create trades index template
+        kubectl exec -n umbrella-storage "$ES_POD" -- \
+            curl -s -X PUT "http://localhost:9200/_index_template/trades-template" \
+            -H "Content-Type: application/json" \
+            -d '{"index_patterns":["trades-*"],"template":{"settings":{"number_of_shards":1,"number_of_replicas":0},"mappings":{"properties":{"message_id":{"type":"keyword"},"channel":{"type":"keyword"},"direction":{"type":"keyword"},"timestamp":{"type":"date"},"participants":{"type":"nested","properties":{"id":{"type":"keyword"},"name":{"type":"text","fields":{"keyword":{"type":"keyword"}}},"role":{"type":"keyword"},"entity_id":{"type":"keyword"},"entity_name":{"type":"keyword"}}},"body_text":{"type":"text","analyzer":"standard"},"metadata":{"type":"object","enabled":true,"properties":{"ticker":{"type":"keyword"},"side":{"type":"keyword"},"quantity":{"type":"long"},"price":{"type":"double"},"notional":{"type":"double"},"currency":{"type":"keyword"},"order_type":{"type":"keyword"},"venue":{"type":"keyword"},"execution_id":{"type":"keyword"},"asset_class":{"type":"keyword"},"account_id":{"type":"keyword"},"settlement_date":{"type":"date","format":"yyyy-MM-dd||strict_date"},"order_id":{"type":"keyword"}}},"processing_status":{"type":"keyword"}}}},"priority":200}' \
+            > /dev/null 2>&1 && info "  trades-* index template created" || warn "  trades template creation failed"
+
+        # Delete old trades indices and recreate
+        kubectl exec -n umbrella-storage "$ES_POD" -- \
+            curl -s -X DELETE "http://localhost:9200/trades-*" > /dev/null 2>&1 || true
+
+        TRADE_MONTH=$(date -u +%Y.%m)
+        TRADE_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        TRADE_INDEX="trades-${TRADE_MONTH}"
+
+        # Create index
+        kubectl exec -n umbrella-storage "$ES_POD" -- \
+            curl -s -X PUT "http://localhost:9200/${TRADE_INDEX}" \
+            -H "Content-Type: application/json" \
+            -d '{"settings":{"number_of_shards":1,"number_of_replicas":0}}' > /dev/null 2>&1
+
+        # Disable disk thresholds for minikube
+        kubectl exec -n umbrella-storage "$ES_POD" -- \
+            curl -s -X PUT "http://localhost:9200/_cluster/settings" \
+            -H "Content-Type: application/json" \
+            -d '{"transient":{"cluster.routing.allocation.disk.threshold_enabled":false}}' > /dev/null 2>&1
+
+        # Wait for shards
+        for attempt in $(seq 1 10); do
+            IDX_STATUS=$(kubectl exec -n umbrella-storage "$ES_POD" -- \
+                curl -s "http://localhost:9200/_cluster/health/${TRADE_INDEX}?wait_for_status=yellow&timeout=5s" 2>/dev/null | \
+                jq -r '.status // empty')
+            if [ "$IDX_STATUS" = "yellow" ] || [ "$IDX_STATUS" = "green" ]; then
+                break
+            fi
+            sleep 2
+        done
+
+        # Index test trade
+        TRADE_PUT_HTTP=$(kubectl exec -n umbrella-storage "$ES_POD" -- \
+            curl -s -o /dev/null -w "%{http_code}" -X PUT \
+            "http://localhost:9200/${TRADE_INDEX}/_doc/EX-TEST-TRADE-001" \
+            -H "Content-Type: application/json" \
+            -d "{\"message_id\":\"EX-TEST-TRADE-001\",\"channel\":\"trade_data\",\"direction\":\"inbound\",\"timestamp\":\"${TRADE_TS}\",\"participants\":[{\"id\":\"alice@example.com\",\"name\":\"Alice (Test Sender)\",\"role\":\"trader\"},{\"id\":\"broker-001\",\"name\":\"Test Broker\",\"role\":\"counterparty\"}],\"body_text\":\"BUY 1,000 TEST @ 50.00 via NYSE\",\"metadata\":{\"ticker\":\"TEST\",\"side\":\"buy\",\"quantity\":1000,\"price\":50.00,\"notional\":50000.00,\"currency\":\"USD\",\"order_type\":\"limit\",\"venue\":\"NYSE\",\"execution_id\":\"EX-TEST-TRADE-001\",\"asset_class\":\"equity\",\"account_id\":\"TEST-ACCT-001\"}}" \
+            2>/dev/null)
+
+        if [ "$TRADE_PUT_HTTP" = "201" ] || [ "$TRADE_PUT_HTTP" = "200" ]; then
+            info "  ✓ Test trade indexed to ${TRADE_INDEX}"
+        else
+            warn "  ✗ Trade index failed (HTTP $TRADE_PUT_HTTP)"
+        fi
+
+        # Refresh so it's searchable
+        kubectl exec -n umbrella-storage "$ES_POD" -- \
+            curl -s -X POST "http://localhost:9200/trades-*/_refresh" > /dev/null 2>&1 || true
+    else
+        warn "  ES pod not found — skipping trade data seeding"
+    fi
+    info "Trade data seeded"
+    echo ""
+fi
+
 # ── Deploy ────────────────────────────────────────────────────────────────
 if [ "$TEST_ONLY" = false ]; then
     info "Deploying umbrella-ui namespace..."
@@ -138,7 +259,20 @@ if [ "$TEST_ONLY" = false ]; then
     ON CONFLICT DO NOTHING;
     "
 
-    info "Seeding built-in tools (es_search, es_get_mapping, sql_query)..."
+    info "Granting cross-schema read access..."
+    kubectl exec -n umbrella-storage "$PG_POD" -- \
+      psql -U postgres -d umbrella -c "
+    GRANT USAGE ON SCHEMA alert TO agent_rw;
+    GRANT SELECT ON ALL TABLES IN SCHEMA alert TO agent_rw;
+    GRANT USAGE ON SCHEMA policy TO agent_rw;
+    GRANT SELECT ON ALL TABLES IN SCHEMA policy TO agent_rw;
+    GRANT USAGE ON SCHEMA policy TO agent_readonly;
+    GRANT SELECT ON ALL TABLES IN SCHEMA policy TO agent_readonly;
+    GRANT USAGE ON SCHEMA entity TO alert_rw;
+    GRANT SELECT ON ALL TABLES IN SCHEMA entity TO alert_rw;
+    "
+
+    info "Seeding built-in tools (es_search, es_get_mapping, sql_query, alert_lookup)..."
     kubectl exec -n umbrella-storage "$PG_POD" -- \
       psql -U postgres -d umbrella -c "
     INSERT INTO agent.tools (name, display_name, description, category, parameters_schema, is_active)
@@ -173,9 +307,50 @@ if [ "$TEST_ONLY" = false ]; then
       true
     )
     ON CONFLICT (name) DO NOTHING;
+    INSERT INTO agent.tools (name, display_name, description, category, parameters_schema, is_active)
+    VALUES (
+      'alert_lookup',
+      'Alert Lookup',
+      'Look up alerts and their corresponding events. Joins alerts with rules and policies so you can filter by policy name, rule name, severity, status, or channel. Optionally fetches matching event documents from Elasticsearch.',
+      'builtin',
+      '{\"type\":\"object\",\"properties\":{\"policy_name\":{\"type\":\"string\",\"description\":\"Filter by policy name (partial match)\"},\"rule_name\":{\"type\":\"string\",\"description\":\"Filter by rule name (partial match)\"},\"severity\":{\"type\":\"string\",\"enum\":[\"low\",\"medium\",\"high\",\"critical\"]},\"status\":{\"type\":\"string\",\"enum\":[\"open\",\"in_review\",\"closed\"]},\"channel\":{\"type\":\"string\",\"description\":\"Filter by channel (e.g. email, chat)\"},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100,\"default\":20},\"fetch_events\":{\"type\":\"boolean\",\"default\":true},\"event_fields\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}',
+      true
+    )
+    ON CONFLICT (name) DO NOTHING;
     "
 
     info "UI deployed successfully"
+    echo ""
+
+    # Re-send test email so it gets indexed with the updated mapping
+    info "Re-sending test email for reingestion..."
+    kubectl delete pod smtp-sender -n umbrella-connectors --ignore-not-found 2>/dev/null || true
+    kubectl run smtp-sender --rm -i --image=umbrella-email:latest --image-pull-policy=Never \
+      -n umbrella-connectors --restart=Never -- \
+      python3 -c "
+import smtplib
+from email.message import EmailMessage
+from email.utils import formatdate
+
+msg = EmailMessage()
+msg['From'] = 'alice@example.com'
+msg['To'] = 'testuser@umbrella.local'
+msg['Subject'] = 'Pipeline Test - E2E Validation'
+msg['Message-ID'] = '<pipeline-test-001@example.com>'
+msg['Date'] = formatdate(localtime=False)
+msg.set_content('Test email for pipeline validation. If this appears in Elasticsearch, all 4 stages work. This message contains potential fraud activity for compliance testing.')
+
+with smtplib.SMTP('mailserver.umbrella-connectors.svc', 25) as s:
+    s.send_message(msg)
+    print('Email sent successfully')
+" 2>/dev/null || warn "Could not re-send test email (connectors may not be running)"
+
+    info "Waiting 30s for pipeline to process..."
+    for i in {30..1}; do
+        echo -ne "\rWaiting... ${i}s "
+        sleep 1
+    done
+    echo ""
     echo ""
 fi
 
@@ -280,6 +455,43 @@ else
     warn "✗ GET /agents returned HTTP $AGENT_HEALTH_RESPONSE (agent runtime may be down)"
 fi
 
+# Generate a supervisor token (needed for tool registry check and later stages)
+SUPERVISOR_TOKEN=$(uv run --project ui/backend python -c "
+from jose import jwt
+import time
+payload = {
+    'sub': '00000000-0000-0000-0000-000000000001',
+    'roles': ['supervisor'],
+    'type': 'access',
+    'exp': int(time.time()) + 300,
+}
+print(jwt.encode(payload, '$TEST_JWT_SECRET', algorithm='HS256'))
+")
+
+# Stage 8b: Verify all built-in tools are registered
+info "Stage 8b: Agent tool registry..."
+TOOLS_OK=0
+EXPECTED_TOOLS="alert_lookup es_get_mapping es_search sql_query"
+
+TOOLS_RESPONSE=$(curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
+    http://localhost:8001/api/v1/agent-tools)
+TOOLS_TOTAL=$(echo "$TOOLS_RESPONSE" | jq -r '.total // 0' 2>/dev/null)
+TOOLS_FOUND=$(echo "$TOOLS_RESPONSE" | jq -r '[.items[].name] | sort | join(" ")' 2>/dev/null)
+
+TOOLS_MISSING=""
+for t in $EXPECTED_TOOLS; do
+    if ! echo "$TOOLS_FOUND" | grep -qw "$t"; then
+        TOOLS_MISSING="$TOOLS_MISSING $t"
+    fi
+done
+
+if [ -z "$TOOLS_MISSING" ]; then
+    info "✓ All $TOOLS_TOTAL tools registered: $TOOLS_FOUND"
+    TOOLS_OK=1
+else
+    error "✗ Missing tools:$TOOLS_MISSING (found: $TOOLS_FOUND)"
+fi
+
 # NL search — expect 502 without an LLM key, 200 if one is configured
 NL_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
     -X POST http://localhost:8001/api/v1/messages/nl-search \
@@ -300,19 +512,6 @@ fi
 # Stage 9: agent streaming endpoints
 info "Stage 9: Agent streaming endpoints..."
 STREAM_ENDPOINT_OK=0
-
-# Generate a supervisor token for the cancel test
-SUPERVISOR_TOKEN=$(uv run --project ui/backend python -c "
-from jose import jwt
-import time
-payload = {
-    'sub': '00000000-0000-0000-0000-000000000001',
-    'roles': ['supervisor'],
-    'type': 'access',
-    'exp': int(time.time()) + 300,
-}
-print(jwt.encode(payload, '$TEST_JWT_SECRET', algorithm='HS256'))
-")
 
 # Test POST /agent-runs/stream — we expect a 502 (runtime can't reach LLM) or
 # a 201 with {run_id, status} if an agent exists and the runtime is configured.
@@ -456,7 +655,12 @@ else
                     fi
                 elif [ "$RUN_STATUS" = "failed" ]; then
                     RUN_ERR=$(jq -r '.error_message // "unknown"' /tmp/agent_exec.json 2>/dev/null)
-                    warn "✗ Agent run failed: $(echo "$RUN_ERR" | head -c 200)"
+                    if echo "$RUN_ERR" | grep -qi "AuthenticationError\|API key\|Unauthorized\|User not found"; then
+                        warn "~ Agent run failed (expected — LLM auth not configured): $(echo "$RUN_ERR" | head -c 200)"
+                        AGENT_E2E_OK=2
+                    else
+                        warn "✗ Agent run failed: $(echo "$RUN_ERR" | head -c 200)"
+                    fi
                 else
                     warn "~ Agent run status: $RUN_STATUS"
                     AGENT_E2E_OK=2
@@ -480,6 +684,206 @@ else
     fi
 fi
 
+# Stage 11: Entity ↔ Message cross-linking
+info "Stage 11: Entity ↔ Message cross-linking..."
+ENTITY_LINK_OK=0
+
+# Generate admin token (entity CRUD requires admin role)
+ADMIN_TOKEN=$(uv run --project ui/backend python -c "
+from jose import jwt
+import time
+payload = {
+    'sub': '00000000-0000-0000-0000-000000000001',
+    'roles': ['admin'],
+    'type': 'access',
+    'exp': int(time.time()) + 300,
+}
+print(jwt.encode(payload, '$TEST_JWT_SECRET', algorithm='HS256'))
+")
+
+# 1. Create a test entity via the API
+ENTITY_CREATE_HTTP=$(curl -s -o /tmp/entity_create.json -w "%{http_code}" \
+    -X POST http://localhost:8001/api/v1/entities \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -d '{
+      "display_name": "E2E Test Entity",
+      "entity_type": "person",
+      "handles": [{"handle_type": "email", "handle_value": "e2e-entity@example.com"}]
+    }')
+
+# Handle 409 (already exists from a previous run)
+if [ "$ENTITY_CREATE_HTTP" = "409" ]; then
+    TEST_ENTITY_ID=$(curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+        "http://localhost:8001/api/v1/entities?search=E2E+Test+Entity" | \
+        jq -r '.items[0].id // empty' 2>/dev/null)
+elif [ "$ENTITY_CREATE_HTTP" = "201" ]; then
+    TEST_ENTITY_ID=$(jq -r '.id // empty' /tmp/entity_create.json 2>/dev/null)
+else
+    warn "✗ Entity creation returned HTTP $ENTITY_CREATE_HTTP"
+    cat /tmp/entity_create.json 2>/dev/null | head -3
+fi
+rm -f /tmp/entity_create.json
+
+if [ -n "$TEST_ENTITY_ID" ] && [ "$TEST_ENTITY_ID" != "null" ]; then
+    info "  Entity ID: $TEST_ENTITY_ID"
+
+    # 2. Send an email FROM the entity's handle through the ingest pipeline
+    E2E_MSG_ID="e2e-entity-link-$(date +%s)"
+    info "  Sending test email from e2e-entity@example.com (Message-ID: $E2E_MSG_ID)..."
+    kubectl delete pod e2e-entity-sender -n umbrella-connectors --ignore-not-found 2>/dev/null || true
+    kubectl run e2e-entity-sender --rm -i --image=umbrella-email:latest --image-pull-policy=Never \
+      -n umbrella-connectors --restart=Never -- \
+      python3 -c "
+import smtplib
+from email.message import EmailMessage
+from email.utils import formatdate
+
+msg = EmailMessage()
+msg['From'] = 'e2e-entity@example.com'
+msg['To'] = 'testuser@umbrella.local'
+msg['Subject'] = 'Entity Cross-Link E2E Test'
+msg['Message-ID'] = '<${E2E_MSG_ID}@example.com>'
+msg['Date'] = formatdate(localtime=False)
+msg.set_content('Entity cross-link test message for E2E validation.')
+
+with smtplib.SMTP('mailserver.umbrella-connectors.svc', 25) as s:
+    s.send_message(msg)
+    print('Email sent successfully')
+"
+
+    # 3. Poll GET /entities/{id}/messages until the ingested message appears
+    info "  Waiting for entity-linked message to appear (up to 90s)..."
+    FOUND_INDEX=""
+    FOUND_DOC_ID=""
+    ENTITY_MSG_COUNT=0
+    for attempt in $(seq 1 18); do
+        sleep 5
+        ENTITY_MSGS_RESP=$(curl -s -H "Authorization: Bearer $UI_TOKEN" \
+            "http://localhost:8001/api/v1/entities/${TEST_ENTITY_ID}/messages?limit=10")
+        ENTITY_MSG_COUNT=$(echo "$ENTITY_MSGS_RESP" | jq -r '.total // 0' 2>/dev/null || echo "0")
+        if [ "$ENTITY_MSG_COUNT" -gt 0 ]; then
+            FOUND_INDEX=$(echo "$ENTITY_MSGS_RESP" | jq -r '.items[0].index // empty' 2>/dev/null)
+            FOUND_DOC_ID=$(echo "$ENTITY_MSGS_RESP" | jq -r '.items[0].message.message_id // empty' 2>/dev/null)
+            info "  ✓ Entity messages found $ENTITY_MSG_COUNT message(s) after $((attempt * 5))s"
+            break
+        fi
+        echo -ne "\r  Waiting... $((attempt * 5))s"
+    done
+    echo ""
+
+    if [ "$ENTITY_MSG_COUNT" -eq 0 ]; then
+        warn "✗ No entity-linked messages appeared after 90s"
+    else
+        info "  ✓ GET /entities/{id}/messages returned $ENTITY_MSG_COUNT message(s)"
+
+        # 4. Test: GET /messages/{index}/{doc_id} returns entity_id on participant
+        if [ -n "$FOUND_INDEX" ] && [ -n "$FOUND_DOC_ID" ]; then
+            MSG_HTTP=$(curl -s -o /tmp/msg_detail.json -w "%{http_code}" \
+                -H "Authorization: Bearer $UI_TOKEN" \
+                "http://localhost:8001/api/v1/messages/${FOUND_INDEX}/${FOUND_DOC_ID}")
+
+            if [ "$MSG_HTTP" = "200" ]; then
+                HAS_ENTITY_ID=$(jq -r "[.participants[] | select(.entity_id==\"${TEST_ENTITY_ID}\")] | length" /tmp/msg_detail.json 2>/dev/null || echo "0")
+
+                if [ "$HAS_ENTITY_ID" -gt 0 ]; then
+                    info "  ✓ GET /messages/{index}/{doc_id} has entity_id on participant"
+                    ENTITY_LINK_OK=1
+                else
+                    warn "✗ Message retrieved but participant missing entity_id"
+                    jq '.participants' /tmp/msg_detail.json 2>/dev/null | head -10
+                fi
+            else
+                warn "✗ GET /messages/{index}/{doc_id} returned HTTP $MSG_HTTP"
+                cat /tmp/msg_detail.json 2>/dev/null | head -5
+            fi
+            rm -f /tmp/msg_detail.json
+        fi
+    fi
+else
+    warn "✗ Could not create or find test entity"
+fi
+
+# Stage 12: Trade data in ES + trade search API
+info "Stage 12: Trade data + trade search API..."
+TRADE_OK=0
+
+# 12a. Check trade data exists in ES
+ES_POD=$(kubectl get pod -n umbrella-storage -l app=elasticsearch -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -n "$ES_POD" ]; then
+    TRADE_ES_COUNT=$(kubectl exec -n umbrella-storage "$ES_POD" -- \
+        curl -s "http://localhost:9200/trades-*/_count" \
+        -H "Content-Type: application/json" \
+        -d '{"query":{"term":{"message_id":"EX-TEST-TRADE-001"}}}' 2>/dev/null | jq -r '.count // 0')
+
+    if [ "$TRADE_ES_COUNT" -gt 0 ]; then
+        info "  ✓ Test trade found in Elasticsearch (EX-TEST-TRADE-001)"
+    else
+        warn "  ✗ Test trade not found in trades-* index"
+    fi
+else
+    warn "  ✗ ES pod not found"
+fi
+
+# 12b. Test trade search API (port-forward on 8001 may still be active)
+lsof -ti:8001 2>/dev/null | xargs -r kill 2>/dev/null || true
+kubectl port-forward -n umbrella-ui svc/umbrella-ui-backend 8001:8000 >/dev/null 2>&1 &
+PF_TRADE_PID=$!
+sleep 3
+
+TRADES_PROBE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $UI_TOKEN" \
+    "http://localhost:8001/api/v1/trades/search" 2>/dev/null)
+
+if [ "$TRADES_PROBE" = "404" ]; then
+    warn "  ✗ /api/v1/trades/search returns 404 — backend image may need rebuilding"
+else
+    # Search by ticker
+    TRADE_SEARCH_TOTAL=$(curl -s -H "Authorization: Bearer $UI_TOKEN" \
+        "http://localhost:8001/api/v1/trades/search?ticker=TEST" | jq -r '.total // 0' 2>/dev/null || echo "0")
+
+    if [ "$TRADE_SEARCH_TOTAL" -gt 0 ]; then
+        info "  ✓ Trade search by ticker: found $TRADE_SEARCH_TOTAL trade(s)"
+    else
+        warn "  ✗ Trade search by ticker returned 0"
+    fi
+
+    # Search by participant
+    TRADE_PART_TOTAL=$(curl -s -H "Authorization: Bearer $UI_TOKEN" \
+        "http://localhost:8001/api/v1/trades/search?participant=Alice" | jq -r '.total // 0' 2>/dev/null || echo "0")
+
+    if [ "$TRADE_PART_TOTAL" -gt 0 ]; then
+        info "  ✓ Trade search by participant: found $TRADE_PART_TOTAL trade(s)"
+    else
+        warn "  ✗ Trade search by participant returned 0"
+    fi
+
+    # Trade stats
+    TRADE_STATS_TOTAL=$(curl -s -H "Authorization: Bearer $UI_TOKEN" \
+        "http://localhost:8001/api/v1/trades/stats" | jq -r '.total_trades // 0' 2>/dev/null || echo "0")
+
+    if [ "$TRADE_STATS_TOTAL" -gt 0 ]; then
+        info "  ✓ Trade stats: $TRADE_STATS_TOTAL total trade(s)"
+    else
+        warn "  ✗ Trade stats returned 0 trades"
+    fi
+
+    # Trade detail
+    TRADE_MONTH_NOW=$(date -u +%Y.%m)
+    TRADE_DETAIL_RESP=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $UI_TOKEN" \
+        "http://localhost:8001/api/v1/trades/trades-${TRADE_MONTH_NOW}/EX-TEST-TRADE-001")
+    TRADE_DETAIL_HTTP=$(echo "$TRADE_DETAIL_RESP" | tail -1)
+    TRADE_DETAIL_TICKER=$(echo "$TRADE_DETAIL_RESP" | sed '$d' | jq -r '.metadata.ticker // empty' 2>/dev/null)
+
+    if [ "$TRADE_DETAIL_HTTP" = "200" ] && [ "$TRADE_DETAIL_TICKER" = "TEST" ]; then
+        info "  ✓ Trade detail: ticker=$TRADE_DETAIL_TICKER"
+        TRADE_OK=1
+    else
+        warn "  ✗ Trade detail failed (HTTP $TRADE_DETAIL_HTTP, ticker=$TRADE_DETAIL_TICKER)"
+    fi
+fi
+
+kill $PF_TRADE_PID 2>/dev/null || true
+
 # Cleanup port-forwards
 kill $PF_PID $PF_FE_PID 2>/dev/null || true
 
@@ -492,12 +896,13 @@ echo "Stage 5 (API search):      $([ "$UI_RESULT" -gt 0 ]   && echo '[✓ PASS]'
 echo "Stage 6 (Login/auth):      $([ "$LOGIN_OK" -eq 1 ]    && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "Stage 7 (Frontend serves): $([ "$FRONTEND_OK" -eq 1 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "Stage 8a (Agent runtime):  $([ "$AGENT_HEALTH_OK" -eq 1 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 8b (Tool registry):  $([ "$TOOLS_OK" -eq 1 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 if [ "$NL_SEARCH_OK" -eq 1 ]; then
-    echo "Stage 8b (NL search):      [✓ PASS]"
+    echo "Stage 8c (NL search):      [✓ PASS]"
 elif [ "$NL_SEARCH_OK" -eq 2 ]; then
-    echo "Stage 8b (NL search):      [~ WARN] 502 — set OPENAI_API_KEY in umbrella-agent-runtime-credentials secret"
+    echo "Stage 8c (NL search):      [~ WARN] 502 — set OPENAI_API_KEY in umbrella-agent-runtime-credentials secret"
 else
-    echo "Stage 8b (NL search):      [✗ FAIL]"
+    echo "Stage 8c (NL search):      [✗ FAIL]"
 fi
 if [ "$STREAM_ENDPOINT_OK" -eq 1 ]; then
     echo "Stage 9  (Streaming):      [✓ PASS]"
@@ -513,11 +918,13 @@ elif [ "$AGENT_E2E_OK" -eq 2 ]; then
 else
     echo "Stage 10 (Agent E2E):      [✗ FAIL]"
 fi
+echo "Stage 11 (Entity links):   $([ "$ENTITY_LINK_OK" -eq 1 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 12 (Trade data):     $([ "$TRADE_OK" -eq 1 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "=========================================="
 echo ""
 
-# Stages 8b, 9, and 10 are excluded from hard pass/fail — a missing LLM key or no agents is expected in CI
-if [ "$UI_RESULT" -gt 0 ] && [ "$LOGIN_OK" -eq 1 ] && [ "$FRONTEND_OK" -eq 1 ] && [ "$AGENT_HEALTH_OK" -eq 1 ] && [ "$NL_SEARCH_OK" -ne 0 ] && [ "$STREAM_ENDPOINT_OK" -ne 0 ] && [ "$AGENT_E2E_OK" -ne 0 ]; then
+# Stages 8c, 9, and 10 are excluded from hard pass/fail — a missing LLM key or no agents is expected in CI
+if [ "$UI_RESULT" -gt 0 ] && [ "$LOGIN_OK" -eq 1 ] && [ "$FRONTEND_OK" -eq 1 ] && [ "$AGENT_HEALTH_OK" -eq 1 ] && [ "$TOOLS_OK" -eq 1 ] && [ "$NL_SEARCH_OK" -ne 0 ] && [ "$STREAM_ENDPOINT_OK" -ne 0 ] && [ "$AGENT_E2E_OK" -ne 0 ] && [ "$ENTITY_LINK_OK" -eq 1 ] && [ "$TRADE_OK" -eq 1 ]; then
     info "✓ UI TEST PASSED"
     echo ""
     info "To access the UI:"

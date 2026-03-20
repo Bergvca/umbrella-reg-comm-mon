@@ -67,7 +67,10 @@ class ESSearchTool(BaseTool):
         "Search Elasticsearch for documents and/or run aggregations. "
         "Use 'fields' to request only the fields you need (saves tokens). "
         "Use 'aggs' with size=0 for counts/stats without fetching documents. "
-        "Use 'filters' for term and range filtering."
+        "Use 'filters' for term and range filtering. "
+        "Each result includes a 'link' field with a relative URL to the event detail page "
+        "(e.g. /messages/messages-2001.04/abc123). Use these links in your output when "
+        "referencing specific events so users can click through to them."
     )
     args_schema: type[BaseModel] = ESSearchInput
 
@@ -166,8 +169,10 @@ class ESSearchTool(BaseTool):
             for hit in hits.get("hits", []):
                 doc: dict[str, Any] = {
                     "id": hit["_id"],
+                    "index": hit["_index"],
                     "score": hit.get("_score"),
                     "source": hit["_source"],
+                    "link": f"/messages/{hit['_index']}/{hit['_id']}",
                 }
                 if hit.get("highlight"):
                     doc["highlights"] = hit["highlight"]

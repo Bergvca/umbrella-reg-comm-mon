@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getAlertStats, getAlerts, getAlert, updateAlertStatus, } from "@/api/alerts";
+import { getAlertStats, getAlerts, getAlert, getAlertsForDocument, updateAlertStatus, } from "@/api/alerts";
 export function useAlertStats() {
     return useQuery({
         queryKey: ["alerts", "stats"],
@@ -11,6 +11,13 @@ export function useAlerts(params) {
     return useQuery({
         queryKey: ["alerts", "list", params],
         queryFn: () => getAlerts(params),
+    });
+}
+export function useAlertsForDocument(esIndex, esDocumentId) {
+    return useQuery({
+        queryKey: ["alerts", "by-document", esIndex, esDocumentId],
+        queryFn: () => getAlertsForDocument(esIndex, esDocumentId),
+        enabled: !!esIndex && !!esDocumentId,
     });
 }
 export function useAlert(id) {

@@ -1,0 +1,45 @@
+{
+  "mappings": {
+    "properties": {
+      "query":          { "type": "percolator" },
+      "rule_id":        { "type": "keyword" },
+      "rule_name":      { "type": "keyword" },
+      "policy_id":      { "type": "keyword" },
+      "risk_model_id":  { "type": "keyword" },
+      "severity":       { "type": "keyword" },
+      "message_id":     { "type": "keyword" },
+      "channel":        { "type": "keyword" },
+      "direction":      { "type": "keyword" },
+      "timestamp":      { "type": "date" },
+      "body_text":      { "type": "text", "analyzer": "standard" },
+      "participants": {
+        "type": "nested",
+        "properties": {
+          "id":   { "type": "keyword" },
+          "name": { "type": "text" },
+          "role": { "type": "keyword" },
+          "entity_id":   { "type": "keyword" },
+          "entity_name": { "type": "keyword" }
+        }
+      },
+      "metadata": {
+        "properties": {
+          "subject": { "type": "text" },
+          "ticker": { "type": "keyword" },
+          "side": { "type": "keyword" },
+          "quantity": { "type": "long" },
+          "price": { "type": "double" },
+          "notional": { "type": "double" },
+          "currency": { "type": "keyword" },
+          "order_type": { "type": "keyword" },
+          "venue": { "type": "keyword" },
+          "execution_id": { "type": "keyword" },
+          "asset_class": { "type": "keyword" },
+          "account_id": { "type": "keyword" },
+          "settlement_date": { "type": "date", "format": "yyyy-MM-dd||strict_date" },
+          "order_id": { "type": "keyword" }
+        }
+      }
+    }
+  }
+}

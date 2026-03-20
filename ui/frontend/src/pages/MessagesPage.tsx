@@ -5,8 +5,16 @@ import { MessageSearchResults } from "@/components/messages/MessageSearchResults
 import { SearchModeToggle } from "@/components/messages/SearchModeToggle";
 import { NLQueryExplainer } from "@/components/messages/NLQueryExplainer";
 import { useMessageSearch, useNLSearch } from "@/hooks/useMessages";
+import { useAgentModels } from "@/hooks/useAgents";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { ApiError } from "@/api/client";
 import { AlertCircle } from "lucide-react";
 import type { MessageSearchParams } from "@/api/messages";
@@ -20,6 +28,9 @@ export function MessagesPage() {
   const mode = (searchParams.get("mode") ?? "keyword") as SearchMode;
   const [nlQuery, setNlQuery] = useState(searchParams.get("nlq") ?? "");
   const [nlSubmitted, setNlSubmitted] = useState(searchParams.get("nlq") ?? "");
+  const [nlModelId, setNlModelId] = useState<string | undefined>(searchParams.get("model") ?? undefined);
+  const { data: modelsData } = useAgentModels();
+  const models = modelsData?.items ?? [];
 
   const keywordParams: MessageSearchParams = {
     q: searchParams.get("q") ?? undefined,
@@ -44,7 +55,7 @@ export function MessagesPage() {
   );
 
   const { data: keywordData, isLoading: keywordLoading } = useMessageSearch(keywordParams);
-  const { data: nlData, isLoading: nlLoading, isError: nlIsError, error: nlError } = useNLSearch(nlSubmitted, nlOffset, LIMIT);
+  const { data: nlData, isLoading: nlLoading, isError: nlIsError, error: nlError } = useNLSearch(nlSubmitted, nlOffset, LIMIT, nlModelId);
 
   function nlErrorMessage(): string {
     if (nlError instanceof ApiError) {
@@ -77,12 +88,15 @@ export function MessagesPage() {
     e.preventDefault();
     if (!nlQuery.trim()) return;
     setNlSubmitted(nlQuery.trim());
-    setSearchParams({ mode: "nl", nlq: nlQuery.trim() });
+    const p: Record<string, string> = { mode: "nl", nlq: nlQuery.trim() };
+    if (nlModelId) p.model = nlModelId;
+    setSearchParams(p);
   }
 
   function handleNLPageChange(newOffset: number) {
     const p: Record<string, string> = { mode: "nl" };
     if (nlSubmitted) p.nlq = nlSubmitted;
+    if (nlModelId) p.model = nlModelId;
     if (newOffset > 0) p.offset = String(newOffset);
     setSearchParams(p);
   }
@@ -128,7 +142,22 @@ export function MessagesPage() {
               placeholder="e.g. Show me high-risk emails from last week about derivatives"
               className="resize-none"
             />
-            <div className="flex justify-end">
+            <div className="flex items-center justify-between gap-3">
+              <Select
+                value={nlModelId ?? ""}
+                onValueChange={(v) => setNlModelId(v || undefined)}
+              >
+                <SelectTrigger className="w-64">
+                  <SelectValue placeholder="Model (auto)" />
+                </SelectTrigger>
+                <SelectContent>
+                  {models.map((m) => (
+                    <SelectItem key={m.id} value={m.id}>
+                      {m.name} ({m.provider})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
               <Button type="submit" disabled={nlLoading || !nlQuery.trim()}>
                 {nlLoading ? "Searching…" : "Search"}
               </Button>

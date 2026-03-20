@@ -12,6 +12,7 @@ from langchain_core.callbacks import AsyncCallbackHandler
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from umbrella_agents.db.models import RunStep
+from umbrella_agents.tool_call_parser import unwrap_response_text
 
 logger = structlog.get_logger()
 
@@ -150,7 +151,7 @@ class StreamingAuditCallback(AsyncCallbackHandler):
                     return
                 output_text = gen[0].text if hasattr(gen[0], "text") else str(gen[0])
 
-        output_data = {"response": output_text[:2000]}
+        output_data = {"response": unwrap_response_text(output_text)[:2000]}
 
         # Emit the deferred llm_start now that we know it's a real text response
         if self._pending_llm_start:

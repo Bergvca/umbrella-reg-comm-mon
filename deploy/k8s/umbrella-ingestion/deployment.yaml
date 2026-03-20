@@ -67,6 +67,14 @@ spec:
         - name: INGESTION_MONITORED_DOMAINS
           value: '["example.com","acme.com"]'
 
+        # Entity resolution (PostgreSQL)
+        - name: ENTITY_DB_DSN
+          value: postgresql://entity_rw:changeme-entity@postgresql.umbrella-storage.svc:5432/umbrella
+
+        # Elasticsearch (for real-time percolation)
+        - name: ES_URL
+          value: http://elasticsearch.umbrella-storage.svc:9200
+
         # Logging
         - name: LOG_LEVEL
           value: INFO

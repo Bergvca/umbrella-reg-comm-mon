@@ -11,7 +11,7 @@ import litellm
 import structlog
 from elasticsearch import AsyncElasticsearch
 from langchain_litellm import ChatLiteLLM
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from umbrella_agents.callbacks.audit import AuditCallbackHandler
 from umbrella_agents.callbacks.streaming import StreamingAuditCallback
 from umbrella_agents.db.models import Agent, AgentDataSource, Model, Run
-from umbrella_agents.tool_call_parser import TextToolCallingWrapper
+from umbrella_agents.tool_call_parser import TextToolCallingWrapper, unwrap_response_text
 from umbrella_agents.tools.registry import DataSourceScope, get_registry
 
 logger = structlog.get_logger()
@@ -38,6 +38,11 @@ Do NOT output tool calls as text — use the function calling mechanism provided
 You are NOT in a simulation. Every tool call you make will run against real \
 databases and return real data. Always call tools when you need data instead \
 of guessing.
+
+When referencing specific events or messages in your output, always include \
+a clickable link using the 'link' field from search results. Format links as \
+markdown: [descriptive text](/messages/<index>/<event-id>). This lets users \
+click through to the event detail page.
 
 """
 
@@ -104,6 +109,33 @@ def _build_scope(data_sources: list[AgentDataSource]) -> DataSourceScope:
         elif ds.source_type == "postgresql":
             pg_schemas.append(ds.source_identifier)
     return DataSourceScope(allowed_es_indices=es_indices, allowed_pg_schemas=pg_schemas)
+
+
+def _extract_response_text(messages: list) -> str:
+    """Extract the final text response from a LangGraph message list.
+
+    Walks backwards to find the last AIMessage with non-empty text.
+    Falls back to the last message's content (e.g. a ToolMessage) if
+    the model didn't produce a final summary (recursion limit hit).
+    """
+    def _content_to_str(msg) -> str:
+        content = msg.content if hasattr(msg, "content") else str(msg)
+        if isinstance(content, list):
+            content = " ".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in content
+            )
+        return content.strip() if isinstance(content, str) else ""
+
+    for msg in reversed(messages):
+        text = _content_to_str(msg)
+        if text and isinstance(msg, AIMessage):
+            return text
+
+    # Fallback: use the last message's content
+    if messages:
+        return _content_to_str(messages[-1])
+    return ""
 
 
 async def execute_agent(
@@ -186,13 +218,10 @@ async def execute_agent(
             config={"callbacks": [audit_callback], "recursion_limit": agent_config.max_iterations * 2},
         )
 
-        # Extract final message
+        # Extract the final text response from the message chain.
         messages = result.get("messages", [])
-        if messages:
-            final_msg = messages[-1]
-            output = {"response": final_msg.content if hasattr(final_msg, "content") else str(final_msg)}
-        else:
-            output = {"response": ""}
+        raw = _extract_response_text(messages)
+        output = {"response": unwrap_response_text(raw)}
 
     except Exception as exc:
         status = "failed"
@@ -341,11 +370,8 @@ async def execute_agent_streaming(
                     status = "cancelled"
                 else:
                     messages = result.get("messages", [])
-                    if messages:
-                        final_msg = messages[-1]
-                        output = {"response": final_msg.content if hasattr(final_msg, "content") else str(final_msg)}
-                    else:
-                        output = {"response": ""}
+                    raw = _extract_response_text(messages)
+                    output = {"response": unwrap_response_text(raw)}
 
         except asyncio.CancelledError:
             status = "cancelled"

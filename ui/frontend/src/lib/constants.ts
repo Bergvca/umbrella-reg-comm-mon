@@ -16,6 +16,7 @@ export const CHANNELS = [
   "bloomberg_chat",
   "bloomberg_email",
   "unigy_turret",
+  "trade_data",
 ] as const;
 
 export const ROLES = {

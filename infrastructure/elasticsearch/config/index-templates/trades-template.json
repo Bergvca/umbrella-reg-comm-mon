@@ -1,0 +1,108 @@
+{
+  "index_patterns": ["trades-*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0
+    },
+    "mappings": {
+      "properties": {
+        "message_id": {
+          "type": "keyword"
+        },
+        "channel": {
+          "type": "keyword"
+        },
+        "direction": {
+          "type": "keyword"
+        },
+        "timestamp": {
+          "type": "date"
+        },
+        "participants": {
+          "type": "nested",
+          "properties": {
+            "id": {
+              "type": "keyword"
+            },
+            "name": {
+              "type": "text",
+              "fields": {
+                "keyword": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "role": {
+              "type": "keyword"
+            },
+            "entity_id": {
+              "type": "keyword"
+            },
+            "entity_name": {
+              "type": "keyword"
+            }
+          }
+        },
+        "body_text": {
+          "type": "text",
+          "analyzer": "standard"
+        },
+        "metadata": {
+          "type": "object",
+          "enabled": true,
+          "properties": {
+            "ticker": {
+              "type": "keyword"
+            },
+            "side": {
+              "type": "keyword"
+            },
+            "quantity": {
+              "type": "long"
+            },
+            "price": {
+              "type": "double"
+            },
+            "notional": {
+              "type": "double"
+            },
+            "currency": {
+              "type": "keyword"
+            },
+            "order_type": {
+              "type": "keyword"
+            },
+            "venue": {
+              "type": "keyword"
+            },
+            "execution_id": {
+              "type": "keyword"
+            },
+            "asset_class": {
+              "type": "keyword"
+            },
+            "account_id": {
+              "type": "keyword"
+            },
+            "settlement_date": {
+              "type": "date",
+              "format": "yyyy-MM-dd||strict_date"
+            },
+            "order_id": {
+              "type": "keyword"
+            }
+          }
+        },
+        "processing_status": {
+          "type": "keyword"
+        }
+      }
+    }
+  },
+  "composed_of": [],
+  "priority": 100,
+  "_meta": {
+    "description": "Index template for normalized trade data with typed trade metadata fields"
+  }
+}

@@ -1,0 +1,16 @@
+# Fields used to compute the deterministic event_id (SHA-256 hash).
+# Per-channel field lists — each field is a dot-path into NormalizedMessage.
+# Order matters: fields are concatenated in the listed order before hashing.
+
+default:
+  - channel
+  - timestamp
+  - participants
+  - body_text
+
+email:
+  - channel
+  - metadata.raw_message_id   # SMTP Message-ID header
+  - timestamp
+  - participants
+  - body_text

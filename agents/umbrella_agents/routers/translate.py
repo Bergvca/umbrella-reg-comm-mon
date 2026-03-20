@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import structlog
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
@@ -17,6 +19,7 @@ router = APIRouter(tags=["translate"])
 class TranslateRequest(BaseModel):
     natural_language_query: str
     index_pattern: str = "messages-*"
+    model_id: str | None = None
     field_schema: dict[str, str] = {
         "body_text": "text",
         "transcript": "text",
@@ -41,8 +44,6 @@ async def translate_query(body: TranslateRequest, request: Request):
     """Translate a natural language query into Elasticsearch query DSL."""
     settings = request.app.state.settings
 
-    # Load default model from DB, or fall back to config
-    # For now, we attempt to load the first active model from the DB
     model_str = "openai/gpt-4o"
     api_key = None
     base_url = None
@@ -52,12 +53,25 @@ async def translate_query(body: TranslateRequest, request: Request):
             from sqlalchemy import select
             from umbrella_agents.db.models import Model
 
-            stmt = select(Model).where(Model.is_active.is_(True)).limit(1)
+            if body.model_id:
+                stmt = select(Model).where(
+                    Model.id == uuid.UUID(body.model_id),
+                    Model.is_active.is_(True),
+                )
+            else:
+                stmt = select(Model).where(Model.is_active.is_(True)).limit(1)
             result = await session.execute(stmt)
             model_row = result.scalar_one_or_none()
             if model_row:
                 model_str = _ensure_model_registered(model_row)
                 base_url = model_row.base_url
+            elif body.model_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Model {body.model_id} not found or inactive",
+                )
+    except HTTPException:
+        raise
     except Exception:
         logger.warning("model_db_lookup_failed", exc_info=True)
 

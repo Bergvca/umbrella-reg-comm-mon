@@ -46,6 +46,13 @@ else
     info "Minikube is already running"
 fi
 
+# Elasticsearch requires vm.max_map_count >= 262144
+CURRENT_MAP_COUNT=$(minikube ssh "sysctl -n vm.max_map_count" 2>/dev/null || echo "0")
+if [ "$CURRENT_MAP_COUNT" -lt 262144 ]; then
+    info "Setting vm.max_map_count=262144 on minikube node (required by Elasticsearch)..."
+    minikube ssh "sudo sysctl -w vm.max_map_count=262144" >/dev/null
+fi
+
 # 2. Point Docker to minikube's daemon
 info "Configuring Docker to use minikube's daemon..."
 eval $(minikube docker-env)
@@ -114,6 +121,11 @@ kubectl rollout status deployment/minio -n umbrella-storage --timeout=120s
 info "Deploying Elasticsearch..."
 kubectl apply -f deploy/k8s/umbrella-storage/elasticsearch/
 kubectl rollout status statefulset/elasticsearch -n umbrella-storage --timeout=600s
+
+info "Waiting for ES index templates to be applied..."
+kubectl wait --for=condition=complete job/elasticsearch-init-templates -n umbrella-storage --timeout=120s \
+    || { error "ES init-templates job did not complete"; kubectl logs -n umbrella-storage -l app=elasticsearch-init --tail=20; exit 1; }
+info "ES templates ready"
 
 info "Deploying Logstash..."
 kubectl apply -f deploy/k8s/umbrella-storage/logstash/

@@ -35,6 +35,7 @@ class NLSearchRequest(BaseModel):
     """Request body for POST /messages/nl-search."""
 
     query: str
+    model_id: str | None = None
     offset: int = 0
     limit: int = 20
 

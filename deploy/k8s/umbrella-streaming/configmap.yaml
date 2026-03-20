@@ -49,6 +49,7 @@ data:
         "normalized-messages"
         "processing-results"
         "alerts"
+        "normalized-trades"
         "dead-letter"
         "normalized-messages-dlq"
     )

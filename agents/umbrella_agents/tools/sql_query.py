@@ -78,15 +78,20 @@ class SQLQueryTool(BaseTool):
         if not self.scope.allowed_pg_schemas:
             return json.dumps({"error": "No PostgreSQL schemas are allowed for this agent"})
 
-        search_path = ", ".join(self.scope.allowed_pg_schemas)
+        # Identifiers may be "schema.table" — extract unique schema names
+        schemas = list(dict.fromkeys(
+            s.split(".")[0] for s in self.scope.allowed_pg_schemas
+        ))
+        search_path = ", ".join(schemas)
 
         try:
             async with self.session_factory() as session:
-                # Set search_path to allowed schemas + ensure read-only transaction
-                await session.execute(text(f"SET search_path TO {search_path}"))
-                await session.execute(text("SET TRANSACTION READ ONLY"))
+                # Acquire the underlying connection so all statements share it
+                raw_conn = await session.connection()
+                await raw_conn.execute(text(f"SET search_path TO {search_path}"))
+                await raw_conn.execute(text("SET TRANSACTION READ ONLY"))
 
-                result = await session.execute(text(query))
+                result = await raw_conn.execute(text(query))
                 columns = list(result.keys())
                 rows = [dict(zip(columns, row)) for row in result.fetchall()]
 

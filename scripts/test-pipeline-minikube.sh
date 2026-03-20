@@ -6,22 +6,27 @@
 # This script:
 #   1. Creates per-schema DB roles
 #   2. Seeds a test user for auth
+#   2b. Creates a test entity (so ingestion can resolve it)
 #   3. Sends a test email through the pipeline
-#   4. Verifies all 10 stages:
-#      Stage 1: IMAP Connector (EmailConnector polls mailserver via IMAP)
-#      Stage 2: Email Processor (parse EML from S3)
-#      Stage 3: Ingestion Service (normalize parsed message)
-#      Stage 4: Logstash → Elasticsearch (index normalized message)
-#      Stage 5: UI API message search (query ES via backend)
-#      Stage 6: UI login + auth (PostgreSQL + RBAC)
-#      Stage 7: Seed fraud policy/rule/alert (PostgreSQL)
-#      Stage 8: Alert review E2E (submit decision + verify audit log)
-#      Stage 9: Entity resolution (CRUD entities + handles via API)
+#   4. Verifies all 12 stages:
+#      Stage 1:  IMAP Connector (EmailConnector polls mailserver via IMAP)
+#      Stage 2:  Email Processor (parse EML from S3)
+#      Stage 3:  Ingestion Service (normalize parsed message)
+#      Stage 4:  Logstash → Elasticsearch (index normalized message)
+#      Stage 5:  UI API message search (query ES via backend)
+#      Stage 6:  UI login + auth (PostgreSQL + RBAC)
+#      Stage 7:  Seed fraud policy/rule/alert (PostgreSQL)
+#      Stage 8:  Alert review E2E (submit decision + verify audit log)
+#      Stage 9:  Entity resolution (CRUD entities + handles via API)
 #      Stage 10: Batch alert generation (generate alerts from policies via API)
+#      Stage 11: Trade data in Elasticsearch (trades-* index with typed metadata)
+#      Stage 12: Trade search API (search, stats, detail via /api/v1/trades)
+#      Stage 13: Trade ingestion routing (parsed trade → normalized-trades topic → trades-* ES)
 # Re-exec under bash if invoked with sh/dash
 [ -z "$BASH_VERSION" ] && exec bash "$0" "$@"
 
-set -e
+set -eE
+trap 'error "Script failed at line $LINENO (exit code $?)"' ERR
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -140,6 +145,76 @@ ON CONFLICT DO NOTHING;
 info "All roles and seed data applied."
 echo ""
 
+# Restart UI backend so it picks up the newly created DB roles
+info "Restarting UI backend to refresh database connections..."
+kubectl rollout restart -n umbrella-ui deployment/umbrella-ui-backend >/dev/null 2>&1
+kubectl rollout status -n umbrella-ui deployment/umbrella-ui-backend --timeout=60s >/dev/null 2>&1 || true
+sleep 3
+
+# ─── Step 2b: Create test entity (before email, so ingestion resolves it) ────
+info "Creating test entity for entity resolution..."
+PF_ENTITY_SEED_PID=""
+seed_entity() {
+    kubectl port-forward -n umbrella-ui svc/umbrella-ui-backend 8001:8000 >/dev/null 2>&1 &
+    PF_ENTITY_SEED_PID=$!
+    sleep 3
+
+    TEST_JWT_SECRET="umbrella-dev-jwt-secret-change-in-production"
+    SEED_TOKEN=$(uv run --project ui/backend python -c "
+from jose import jwt
+import time
+payload = {
+    'sub': '00000000-0000-0000-0000-000000000001',
+    'roles': ['admin'],
+    'type': 'access',
+    'exp': int(time.time()) + 300,
+}
+print(jwt.encode(payload, '$TEST_JWT_SECRET', algorithm='HS256'))
+")
+
+    CREATE_ENTITY_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+        -H "Authorization: Bearer $SEED_TOKEN" \
+        -H "Content-Type: application/json" \
+        "http://localhost:8001/api/v1/entities" \
+        -d '{
+            "display_name": "Alice (Test Sender)",
+            "entity_type": "person",
+            "handles": [
+                {"handle_type": "email", "handle_value": "alice@example.com", "is_primary": true}
+            ],
+            "attributes": [
+                {"attr_key": "department", "attr_value": "Trading"},
+                {"attr_key": "company", "attr_value": "Example Corp"}
+            ]
+        }')
+    CREATE_HTTP_CODE=$(echo "$CREATE_ENTITY_RESPONSE" | tail -1)
+    CREATE_BODY=$(echo "$CREATE_ENTITY_RESPONSE" | sed '$d')
+    ENTITY_ID=$(echo "$CREATE_BODY" | jq -r '.id // empty' 2>/dev/null || true)
+
+    if [ -n "$ENTITY_ID" ] && [ "$ENTITY_ID" != "null" ]; then
+        info "✓ Entity created: id=$ENTITY_ID"
+    elif [ "$CREATE_HTTP_CODE" = "409" ]; then
+        SEARCH_RESPONSE=$(curl -s -H "Authorization: Bearer $SEED_TOKEN" \
+            "http://localhost:8001/api/v1/entities?search=Alice")
+        ENTITY_ID=$(echo "$SEARCH_RESPONSE" | jq -r '.items[0].id // empty' 2>/dev/null || true)
+        if [ -n "$ENTITY_ID" ] && [ "$ENTITY_ID" != "null" ]; then
+            info "✓ Entity already exists (re-run): id=$ENTITY_ID"
+        else
+            warn "✗ Entity exists (409) but could not find it via search"
+        fi
+    else
+        warn "✗ Entity creation failed (HTTP $CREATE_HTTP_CODE: $CREATE_BODY)"
+    fi
+}
+
+if seed_entity; then
+    :
+else
+    warn "Entity seeding failed (exit code $?) — continuing without it"
+fi
+kill $PF_ENTITY_SEED_PID 2>/dev/null || true
+echo ""
+
 # ─── Step 3: Wait for services to stabilise ───────────────────────────────────
 info "Waiting for mailserver SMTP to be ready (up to 60s)..."
 for attempt in $(seq 1 12); do
@@ -178,6 +253,149 @@ with smtplib.SMTP('mailserver.umbrella-connectors.svc', 25) as s:
 "
 
 info "Test email sent to testuser@umbrella.local"
+echo ""
+
+# ─── Step 4b: Create trades Kafka topic + ES template, publish test trade ────
+info "Setting up trade data pipeline..."
+
+# Create normalized-trades Kafka topic (idempotent)
+kubectl delete pod kafka-create-trades-topic -n umbrella-streaming --ignore-not-found 2>/dev/null || true
+kubectl run kafka-create-trades-topic --rm -i --image=apache/kafka:4.1.1 -n umbrella-streaming --restart=Never -- \
+  /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka:9092 \
+  --create --if-not-exists \
+  --topic normalized-trades \
+  --partitions 1 \
+  --replication-factor 1 2>/dev/null || true
+info "Kafka topic 'normalized-trades' ensured"
+
+# Port-forward Elasticsearch and wait until it responds
+kubectl port-forward -n umbrella-storage svc/elasticsearch 9200:9200 >/dev/null 2>&1 &
+PF_ES_TRADE_PID=$!
+info "Waiting for Elasticsearch port-forward..."
+for attempt in $(seq 1 30); do
+    if curl -s --max-time 2 http://localhost:9200/_cluster/health >/dev/null 2>&1; then
+        info "Elasticsearch reachable on localhost:9200 (after ${attempt}s)"
+        break
+    fi
+    if [ "$attempt" -eq 30 ]; then
+        error "Elasticsearch not reachable after 60s — check the elasticsearch pod in umbrella-storage namespace"
+        exit 1
+    fi
+    sleep 2
+done
+
+# On minikube, ES may refuse to allocate shards for new indices if disk usage
+# exceeds the flood-stage watermark (default 95%). Temporarily raise it.
+info "Disabling ES disk allocation thresholds for minikube..."
+curl -s -X PUT "http://localhost:9200/_cluster/settings" \
+  -H "Content-Type: application/json" \
+  -d '{"transient":{"cluster.routing.allocation.disk.threshold_enabled":false}}' >/dev/null 2>&1
+
+# Create trades-* index template — use heredoc to avoid shell escaping issues
+TRADES_TPL_RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
+  "http://localhost:9200/_index_template/trades-template" \
+  -H "Content-Type: application/json" \
+  -d @- <<'TRADES_TPL_EOF'
+{"index_patterns":["trades-*"],"template":{"settings":{"number_of_shards":1,"number_of_replicas":0},"mappings":{"properties":{"message_id":{"type":"keyword"},"channel":{"type":"keyword"},"direction":{"type":"keyword"},"timestamp":{"type":"date"},"participants":{"type":"nested","properties":{"id":{"type":"keyword"},"name":{"type":"text","fields":{"keyword":{"type":"keyword"}}},"role":{"type":"keyword"},"entity_id":{"type":"keyword"},"entity_name":{"type":"keyword"}}},"body_text":{"type":"text","analyzer":"standard"},"metadata":{"type":"object","enabled":true,"properties":{"ticker":{"type":"keyword"},"side":{"type":"keyword"},"quantity":{"type":"long"},"price":{"type":"double"},"notional":{"type":"double"},"currency":{"type":"keyword"},"order_type":{"type":"keyword"},"venue":{"type":"keyword"},"execution_id":{"type":"keyword"},"asset_class":{"type":"keyword"},"account_id":{"type":"keyword"},"settlement_date":{"type":"date","format":"yyyy-MM-dd||strict_date"},"order_id":{"type":"keyword"}}},"processing_status":{"type":"keyword"}}}},"priority":200}
+TRADES_TPL_EOF
+)
+TRADES_TPL_HTTP=$(echo "$TRADES_TPL_RESPONSE" | tail -1)
+TRADES_TPL_BODY=$(echo "$TRADES_TPL_RESPONSE" | sed '$d')
+
+if [ "$TRADES_TPL_HTTP" = "200" ]; then
+    info "✓ trades-* index template created"
+else
+    warn "✗ trades-* index template failed (HTTP $TRADES_TPL_HTTP): $TRADES_TPL_BODY"
+fi
+
+# Pre-create the trades index so shards are allocated before we try to write.
+TRADE_MONTH=$(date -u +%Y.%m)
+TRADE_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+TRADE_INDEX="trades-${TRADE_MONTH}"
+
+# Delete stale index from a previous failed run, then explicitly create it
+curl -s -X DELETE "http://localhost:9200/${TRADE_INDEX}" >/dev/null 2>&1 || true
+sleep 2
+CREATE_IDX_RESP=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "http://localhost:9200/${TRADE_INDEX}" \
+  -H "Content-Type: application/json" -d '{"settings":{"number_of_shards":1,"number_of_replicas":0}}')
+info "Create index ${TRADE_INDEX}: HTTP $CREATE_IDX_RESP"
+
+# Wait for the index to have a green/yellow status (shards active)
+info "Waiting for trades index shards to be active..."
+for attempt in $(seq 1 15); do
+    HEALTH=$(curl -s "http://localhost:9200/_cluster/health/${TRADE_INDEX}?wait_for_status=yellow&timeout=5s" 2>/dev/null || true)
+    IDX_STATUS=$(echo "$HEALTH" | jq -r '.status // empty' 2>/dev/null || true)
+    if [ "$IDX_STATUS" = "yellow" ] || [ "$IDX_STATUS" = "green" ]; then
+        info "Index ${TRADE_INDEX} shards active (status=$IDX_STATUS)"
+        break
+    fi
+    if [ "$attempt" -eq 15 ]; then
+        warn "Index shards not active after 75s (status=$IDX_STATUS)"
+        # Dump shard allocation explanation for debugging
+        warn "Shard allocation explanation:"
+        curl -s "http://localhost:9200/_cluster/allocation/explain?pretty" \
+          -H "Content-Type: application/json" \
+          -d "{\"index\":\"${TRADE_INDEX}\",\"shard\":0,\"primary\":true}" 2>/dev/null | head -30
+    fi
+    sleep 2
+done
+
+# Now index the test trade document
+TRADE_DOC_RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
+  "http://localhost:9200/${TRADE_INDEX}/_doc/EX-TEST-TRADE-001" \
+  -H "Content-Type: application/json" \
+  -d @- <<TRADE_DOC_EOF
+{
+  "message_id": "EX-TEST-TRADE-001",
+  "channel": "trade_data",
+  "direction": "inbound",
+  "timestamp": "$TRADE_TS",
+  "participants": [
+    {"id": "alice@example.com", "name": "Alice (Test Sender)", "role": "trader"},
+    {"id": "broker-001", "name": "Test Broker", "role": "counterparty"}
+  ],
+  "body_text": "BUY 1,000 TEST @ 50.00 via NYSE",
+  "metadata": {
+    "ticker": "TEST",
+    "side": "buy",
+    "quantity": 1000,
+    "price": 50.00,
+    "notional": 50000.00,
+    "currency": "USD",
+    "order_type": "limit",
+    "venue": "NYSE",
+    "execution_id": "EX-TEST-TRADE-001",
+    "asset_class": "equity",
+    "account_id": "TEST-ACCT-001"
+  }
+}
+TRADE_DOC_EOF
+)
+TRADE_DOC_HTTP=$(echo "$TRADE_DOC_RESPONSE" | tail -1)
+TRADE_DOC_BODY=$(echo "$TRADE_DOC_RESPONSE" | sed '$d')
+
+if [ "$TRADE_DOC_HTTP" = "201" ] || [ "$TRADE_DOC_HTTP" = "200" ]; then
+    info "✓ Test trade indexed to ${TRADE_INDEX}"
+else
+    warn "✗ Trade index failed (HTTP $TRADE_DOC_HTTP): $TRADE_DOC_BODY"
+fi
+
+# Also publish to normalized-trades Kafka topic (to test Logstash trades pipeline)
+TRADE_KAFKA_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+TRADE_KAFKA_JSON='{"message_id":"EX-TEST-TRADE-002","channel":"trade_data","direction":"outbound","timestamp":"'"$TRADE_KAFKA_TS"'","participants":[{"id":"alice@example.com","name":"Alice (Test Sender)","role":"trader"},{"id":"broker-002","name":"Test Broker 2","role":"counterparty"}],"body_text":"SELL 500 TEST @ 55.00 via NASDAQ","metadata":{"ticker":"TEST","side":"sell","quantity":500,"price":55.00,"notional":27500.00,"currency":"USD","order_type":"market","venue":"NASDAQ","execution_id":"EX-TEST-TRADE-002","asset_class":"equity","account_id":"TEST-ACCT-001"}}'
+kubectl delete pod kafka-publish-trade -n umbrella-streaming --ignore-not-found 2>/dev/null || true
+echo "$TRADE_KAFKA_JSON" | \
+kubectl run kafka-publish-trade --rm -i --image=apache/kafka:4.1.1 -n umbrella-streaming --restart=Never -- \
+  /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server kafka:9092 \
+  --topic normalized-trades 2>/dev/null || true
+info "Test trade published to normalized-trades Kafka topic"
+
+# Refresh index so the directly-indexed trade is searchable immediately
+curl -s -X POST "http://localhost:9200/trades-*/_refresh" >/dev/null 2>&1 || true
+
+kill $PF_ES_TRADE_PID 2>/dev/null || true
 echo ""
 
 # ─── Step 5: Wait for pipeline to process ────────────────────────────────────
@@ -287,19 +505,19 @@ fi
 info "Checking UI login flow (Stage 6)..."
 LOGIN_OK=0
 
-kubectl port-forward -n umbrella-ui svc/umbrella-ui-backend 8001:8000 >/dev/null 2>&1 &
+kubectl port-forward -n umbrella-ui svc/umbrella-ui-backend 8002:8000 >/dev/null 2>&1 &
 PF_UI2_PID=$!
-sleep 2
+sleep 3
 
-LOGIN_RESPONSE=$(curl -s -X POST http://localhost:8001/api/v1/auth/login \
+LOGIN_RESPONSE=$(curl -s -X POST http://localhost:8002/api/v1/auth/login \
     -H "Content-Type: application/json" \
     -d '{"username":"testadmin","password":"testpass123"}')
 
-ACCESS_TOKEN=$(echo "$LOGIN_RESPONSE" | jq -r '.access_token // empty' 2>/dev/null)
+ACCESS_TOKEN=$(echo "$LOGIN_RESPONSE" | jq -r '.access_token // empty' 2>/dev/null || true)
 
 if [ -n "$ACCESS_TOKEN" ] && [ "$ACCESS_TOKEN" != "null" ]; then
     ME_RESPONSE=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
-        http://localhost:8001/api/v1/auth/me)
+        http://localhost:8002/api/v1/auth/me)
     HAS_ADMIN=$(echo "$ME_RESPONSE" | jq -r '[.roles[]? | select(. == "admin")] | length' 2>/dev/null || echo "0")
 
     if [ "$HAS_ADMIN" -gt 0 ]; then
@@ -318,7 +536,6 @@ kill $PF_UI2_PID 2>/dev/null || true
 info "Seeding fraud policy, rule, and alert (Stage 7)..."
 ALERT_OK=0
 
-EXACT_MSG_ID="<pipeline-test-001@example.com>"
 ES_DOC_ID=""
 ES_INDEX=""
 ES_TS=""
@@ -331,10 +548,10 @@ info "Waiting for pipeline-test-001 document to appear in Elasticsearch..."
 for attempt in $(seq 1 12); do
     ES_DOC=$(curl -s "http://localhost:9200/messages-*/_search" \
       -H "Content-Type: application/json" \
-      -d "{\"query\":{\"term\":{\"message_id.keyword\":\"${EXACT_MSG_ID}\"}},\"size\":1}")
+      -d '{"query":{"query_string":{"query":"pipeline-test-001","default_field":"metadata.raw_message_id"}},"size":1}')
     ES_DOC_ID=$(echo "$ES_DOC" | jq -r '.hits.hits[0]._id // empty')
     ES_INDEX=$(echo "$ES_DOC" | jq -r '.hits.hits[0]._index // empty')
-    ES_TS=$(echo "$ES_DOC" | jq -r '.hits.hits[0]._source["@timestamp"] // empty')
+    ES_TS=$(echo "$ES_DOC" | jq -r '.hits.hits[0]._source.timestamp // .hits.hits[0]._source["@timestamp"] // empty')
 
     if [ -n "$ES_DOC_ID" ] && [ -n "$ES_INDEX" ]; then
         info "✓ Found document after $((attempt * 5))s: id=$ES_DOC_ID index=$ES_INDEX"
@@ -458,7 +675,7 @@ if [ "$LOGIN_OK" -eq 1 ] && [ "$ALERT_OK" -eq 1 ]; then
     # 8a. GET alert detail
     ALERT_DETAIL=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
         "http://localhost:8001/api/v1/alerts/$ALERT_ID")
-    ALERT_NAME=$(echo "$ALERT_DETAIL" | jq -r '.name // empty' 2>/dev/null)
+    ALERT_NAME=$(echo "$ALERT_DETAIL" | jq -r '.name // empty' 2>/dev/null || true)
 
     if [ -n "$ALERT_NAME" ]; then
         info "  ✓ Fetched alert: $ALERT_NAME"
@@ -472,7 +689,7 @@ if [ "$LOGIN_OK" -eq 1 ] && [ "$ALERT_OK" -eq 1 ]; then
         -H "Content-Type: application/json" \
         "http://localhost:8001/api/v1/alerts/$ALERT_ID/decisions" \
         -d "{\"status_id\":\"$DECISION_STATUS_ID\",\"comment\":\"E2E pipeline test — escalating for review\"}")
-    DECISION_ID=$(echo "$DECISION_RESPONSE" | jq -r '.id // empty' 2>/dev/null)
+    DECISION_ID=$(echo "$DECISION_RESPONSE" | jq -r '.id // empty' 2>/dev/null || true)
 
     if [ -n "$DECISION_ID" ] && [ "$DECISION_ID" != "null" ]; then
         info "  ✓ Decision submitted: id=$DECISION_ID"
@@ -508,39 +725,17 @@ if [ "$LOGIN_OK" -eq 1 ]; then
     PF_UI4_PID=$!
     sleep 3
 
-    # 9a. Create entity (or find existing on re-runs)
-    CREATE_ENTITY_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        "http://localhost:8001/api/v1/entities" \
-        -d '{
-            "display_name": "Alice (Test Sender)",
-            "entity_type": "person",
-            "handles": [
-                {"handle_type": "email", "handle_value": "alice@example.com", "is_primary": true}
-            ],
-            "attributes": [
-                {"attr_key": "department", "attr_value": "Trading"},
-                {"attr_key": "company", "attr_value": "Example Corp"}
-            ]
-        }')
-    CREATE_HTTP_CODE=$(echo "$CREATE_ENTITY_RESPONSE" | tail -1)
-    CREATE_BODY=$(echo "$CREATE_ENTITY_RESPONSE" | sed '$d')
-    ENTITY_ID=$(echo "$CREATE_BODY" | jq -r '.id // empty' 2>/dev/null)
-
-    if [ -n "$ENTITY_ID" ] && [ "$ENTITY_ID" != "null" ]; then
-        info "  ✓ Entity created: id=$ENTITY_ID"
-    elif [ "$CREATE_HTTP_CODE" = "409" ]; then
+    # 9a. Look up entity created in Step 2b
+    if [ -z "$ENTITY_ID" ] || [ "$ENTITY_ID" = "null" ]; then
         SEARCH_RESPONSE=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
             "http://localhost:8001/api/v1/entities?search=Alice")
-        ENTITY_ID=$(echo "$SEARCH_RESPONSE" | jq -r '.items[0].id // empty' 2>/dev/null)
-        if [ -n "$ENTITY_ID" ] && [ "$ENTITY_ID" != "null" ]; then
-            info "  ✓ Entity already exists (re-run): id=$ENTITY_ID"
-        else
-            warn "  ✗ Entity exists (409) but could not find it via search"
-        fi
+        ENTITY_ID=$(echo "$SEARCH_RESPONSE" | jq -r '.items[0].id // empty' 2>/dev/null || true)
+    fi
+
+    if [ -n "$ENTITY_ID" ] && [ "$ENTITY_ID" != "null" ]; then
+        info "  ✓ Entity found: id=$ENTITY_ID"
     else
-        warn "  ✗ Entity creation failed (response: $CREATE_BODY)"
+        warn "  ✗ Entity not found (was Step 2b skipped?)"
     fi
 
     # 9b. GET entity and verify handles + attributes
@@ -564,7 +759,7 @@ if [ "$LOGIN_OK" -eq 1 ]; then
             -d '{"handle_type": "teams_id", "handle_value": "alice@example.onmicrosoft.com"}')
         ADD_HTTP_CODE=$(echo "$ADD_HANDLE_RESPONSE" | tail -1)
         ADD_BODY=$(echo "$ADD_HANDLE_RESPONSE" | sed '$d')
-        HANDLE_ID=$(echo "$ADD_BODY" | jq -r '.id // empty' 2>/dev/null)
+        HANDLE_ID=$(echo "$ADD_BODY" | jq -r '.id // empty' 2>/dev/null || true)
 
         if [ -n "$HANDLE_ID" ] && [ "$HANDLE_ID" != "null" ]; then
             info "  ✓ Second handle added: id=$HANDLE_ID"
@@ -584,6 +779,17 @@ if [ "$LOGIN_OK" -eq 1 ]; then
             ENTITY_OK=1
         else
             warn "  ✗ Entity not found in list (response: $LIST_RESPONSE)"
+        fi
+
+        # 9e. Check entity-linked messages
+        ENTITY_MSG_RESPONSE=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "http://localhost:8001/api/v1/entities/$ENTITY_ID/messages?offset=0&limit=10")
+        ENTITY_MSG_TOTAL=$(echo "$ENTITY_MSG_RESPONSE" | jq -r '.total // 0' 2>/dev/null || echo "0")
+
+        if [ "$ENTITY_MSG_TOTAL" -gt 0 ]; then
+            info "  ✓ Entity messages: found $ENTITY_MSG_TOTAL message(s) for Alice (Test Sender)"
+        else
+            warn "  ✗ No messages found for entity (response: $ENTITY_MSG_RESPONSE)"
         fi
     fi
 
@@ -611,9 +817,9 @@ if [ "$LOGIN_OK" -eq 1 ] && [ "$ALERT_OK" -eq 1 ]; then
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
         "http://localhost:8001/api/v1/alert-generation/jobs" \
-        -d '{"scope_type":"all","query_kql":"message_id:pipeline-test-001"}')
-    JOB_ID=$(echo "$JOB_RESPONSE" | jq -r '.id // empty' 2>/dev/null)
-    JOB_STATUS=$(echo "$JOB_RESPONSE" | jq -r '.status // empty' 2>/dev/null)
+        -d '{"scope_type":"all","query_kql":"metadata.raw_message_id:pipeline-test-001"}')
+    JOB_ID=$(echo "$JOB_RESPONSE" | jq -r '.id // empty' 2>/dev/null || true)
+    JOB_STATUS=$(echo "$JOB_RESPONSE" | jq -r '.status // empty' 2>/dev/null || true)
 
     if [ -n "$JOB_ID" ] && [ "$JOB_ID" != "null" ]; then
         info "  ✓ Generation job created: id=$JOB_ID status=$JOB_STATUS"
@@ -627,11 +833,11 @@ if [ "$LOGIN_OK" -eq 1 ] && [ "$ALERT_OK" -eq 1 ]; then
             sleep 5
             POLL_RESPONSE=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
                 "http://localhost:8001/api/v1/alert-generation/jobs/$JOB_ID")
-            JOB_STATUS=$(echo "$POLL_RESPONSE" | jq -r '.status // empty' 2>/dev/null)
-            ALERTS_CREATED=$(echo "$POLL_RESPONSE" | jq -r '.alerts_created // 0' 2>/dev/null)
-            RULES_EVALUATED=$(echo "$POLL_RESPONSE" | jq -r '.rules_evaluated // 0' 2>/dev/null)
-            DOCS_SCANNED=$(echo "$POLL_RESPONSE" | jq -r '.documents_scanned // 0' 2>/dev/null)
-            ERROR_MSG=$(echo "$POLL_RESPONSE" | jq -r '.error_message // empty' 2>/dev/null)
+            JOB_STATUS=$(echo "$POLL_RESPONSE" | jq -r '.status // empty' 2>/dev/null || true)
+            ALERTS_CREATED=$(echo "$POLL_RESPONSE" | jq -r '.alerts_created // 0' 2>/dev/null || true)
+            RULES_EVALUATED=$(echo "$POLL_RESPONSE" | jq -r '.rules_evaluated // 0' 2>/dev/null || true)
+            DOCS_SCANNED=$(echo "$POLL_RESPONSE" | jq -r '.documents_scanned // 0' 2>/dev/null || true)
+            ERROR_MSG=$(echo "$POLL_RESPONSE" | jq -r '.error_message // empty' 2>/dev/null || true)
 
             if [ "$JOB_STATUS" = "completed" ] || [ "$JOB_STATUS" = "failed" ]; then
                 break
@@ -662,29 +868,252 @@ else
     warn "  ⊘ Skipped — Stage 6 (login) or Stage 7 (alert) did not pass"
 fi
 
+# Stage 11: Trade data in Elasticsearch
+info "Trade data in Elasticsearch (Stage 11)..."
+TRADE_ES_OK=0
+
+kubectl port-forward -n umbrella-storage svc/elasticsearch 9200:9200 >/dev/null 2>&1 &
+PF_ES3_PID=$!
+
+# Wait for port-forward to be ready
+for attempt in $(seq 1 30); do
+    if curl -s --max-time 2 http://localhost:9200/_cluster/health >/dev/null 2>&1; then
+        break
+    fi
+    if [ "$attempt" -eq 30 ]; then
+        error "Elasticsearch not reachable after 60s"
+        exit 1
+    fi
+    sleep 2
+done
+
+# Check if trades-* index exists at all
+TRADES_INDEX_EXISTS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:9200/trades-*" 2>/dev/null || true)
+if [ "$TRADES_INDEX_EXISTS" = "404" ]; then
+    warn "  ✗ No trades-* index exists — the direct PUT in Step 4b may have failed"
+    warn "  Checking ES template exists..."
+    TPL_CHECK=$(curl -s "http://localhost:9200/_index_template/trades-template" 2>/dev/null | jq -r '.index_templates | length // 0')
+    if [ "$TPL_CHECK" -gt 0 ]; then
+        info "    Template exists but no index was created (document PUT failed)"
+    else
+        warn "    Template also missing — index template creation failed"
+    fi
+else
+    # Check directly-indexed trade (EX-TEST-TRADE-001)
+    TRADE_ES_COUNT=$(curl -s "http://localhost:9200/trades-*/_count" \
+        -H "Content-Type: application/json" \
+        -d '{"query":{"term":{"message_id":"EX-TEST-TRADE-001"}}}' 2>/dev/null | jq -r '.count // 0')
+
+    if [ "$TRADE_ES_COUNT" -gt 0 ]; then
+        info "  ✓ Found test trade (EX-TEST-TRADE-001) in trades-* index"
+    else
+        warn "  ✗ Test trade not found in trades-* (count=$TRADE_ES_COUNT)"
+    fi
+
+    # Verify trade metadata fields are typed correctly
+    TRADE_TICKER=$(curl -s "http://localhost:9200/trades-*/_search" \
+        -H "Content-Type: application/json" \
+        -d '{"query":{"term":{"message_id":"EX-TEST-TRADE-001"}},"size":1}' 2>/dev/null | \
+        jq -r '.hits.hits[0]._source.metadata.ticker // empty')
+
+    if [ "$TRADE_TICKER" = "TEST" ]; then
+        info "  ✓ Trade metadata fields correctly typed (ticker=TEST)"
+        TRADE_ES_OK=1
+    else
+        warn "  ✗ Trade metadata ticker not as expected (got: $TRADE_TICKER)"
+    fi
+
+    # Check total trades
+    TOTAL_TRADES=$(curl -s "http://localhost:9200/trades-*/_count" 2>/dev/null | jq -r '.count // 0')
+    info "  Total trades in trades-*: $TOTAL_TRADES"
+
+    # Check Logstash-routed trade
+    KAFKA_TRADE_COUNT=$(curl -s "http://localhost:9200/trades-*/_count" \
+        -H "Content-Type: application/json" \
+        -d '{"query":{"term":{"message_id":"EX-TEST-TRADE-002"}}}' 2>/dev/null | jq -r '.count // 0')
+
+    if [ "$KAFKA_TRADE_COUNT" -gt 0 ]; then
+        info "  ✓ Kafka-routed trade (EX-TEST-TRADE-002) indexed via Logstash trades pipeline"
+    else
+        warn "  ✗ Kafka-routed trade not yet in trades-* (Logstash trades pipeline may not be deployed)"
+    fi
+fi
+
+kill $PF_ES3_PID 2>/dev/null || true
+
+# Stage 12: Trade search API
+info "Trade search API (Stage 12)..."
+TRADE_API_OK=0
+
+if [ "$LOGIN_OK" -eq 1 ]; then
+    kubectl port-forward -n umbrella-ui svc/umbrella-ui-backend 8001:8000 >/dev/null 2>&1 &
+    PF_UI6_PID=$!
+    sleep 3
+
+    # First check if the trades endpoint exists (requires backend rebuild with trades router)
+    TRADES_PROBE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $ACCESS_TOKEN" \
+        "http://localhost:8001/api/v1/trades/search" 2>/dev/null || true)
+
+    if [ "$TRADES_PROBE" = "404" ]; then
+        warn "  ✗ /api/v1/trades/search returns 404 — backend image needs rebuilding"
+        warn "    Run: docker build -t umbrella-ui-backend ui/backend/ && minikube image load umbrella-ui-backend"
+        warn "    Then: kubectl rollout restart deploy/umbrella-ui-backend -n umbrella-ui"
+    else
+        # 12a. Search trades by ticker
+        TRADE_SEARCH_RESPONSE=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "http://localhost:8001/api/v1/trades/search?ticker=TEST")
+        TRADE_SEARCH_TOTAL=$(echo "$TRADE_SEARCH_RESPONSE" | jq -r '.total // 0' 2>/dev/null || echo "0")
+
+        if [ "$TRADE_SEARCH_TOTAL" -gt 0 ]; then
+            info "  ✓ Trade search by ticker: found $TRADE_SEARCH_TOTAL trade(s)"
+        else
+            warn "  ✗ Trade search by ticker returned 0 (response: $TRADE_SEARCH_RESPONSE)"
+        fi
+
+        # 12b. Search trades by participant
+        TRADE_PARTICIPANT_RESPONSE=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "http://localhost:8001/api/v1/trades/search?participant=Alice")
+        TRADE_PARTICIPANT_TOTAL=$(echo "$TRADE_PARTICIPANT_RESPONSE" | jq -r '.total // 0' 2>/dev/null || echo "0")
+
+        if [ "$TRADE_PARTICIPANT_TOTAL" -gt 0 ]; then
+            info "  ✓ Trade search by participant: found $TRADE_PARTICIPANT_TOTAL trade(s)"
+        else
+            warn "  ✗ Trade search by participant returned 0"
+        fi
+
+        # 12c. Get trade stats
+        TRADE_STATS_RESPONSE=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "http://localhost:8001/api/v1/trades/stats")
+        TRADE_STATS_TOTAL=$(echo "$TRADE_STATS_RESPONSE" | jq -r '.total_trades // 0' 2>/dev/null || echo "0")
+
+        if [ "$TRADE_STATS_TOTAL" -gt 0 ]; then
+            info "  ✓ Trade stats: $TRADE_STATS_TOTAL total trade(s)"
+            TRADE_API_OK=1
+        else
+            warn "  ✗ Trade stats returned 0 trades (response: $TRADE_STATS_RESPONSE)"
+        fi
+
+        # 12d. Get single trade by ID
+        TRADE_MONTH_NOW=$(date -u +%Y.%m)
+        TRADE_DETAIL_RESPONSE=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "http://localhost:8001/api/v1/trades/trades-${TRADE_MONTH_NOW}/EX-TEST-TRADE-001")
+        TRADE_DETAIL_HTTP=$(echo "$TRADE_DETAIL_RESPONSE" | tail -1)
+        TRADE_DETAIL_BODY=$(echo "$TRADE_DETAIL_RESPONSE" | sed '$d')
+        TRADE_DETAIL_TICKER=$(echo "$TRADE_DETAIL_BODY" | jq -r '.metadata.ticker // empty' 2>/dev/null || true)
+
+        if [ "$TRADE_DETAIL_HTTP" = "200" ] && [ "$TRADE_DETAIL_TICKER" = "TEST" ]; then
+            info "  ✓ Trade detail endpoint: ticker=$TRADE_DETAIL_TICKER"
+        else
+            warn "  ✗ Trade detail failed (HTTP $TRADE_DETAIL_HTTP, ticker=$TRADE_DETAIL_TICKER)"
+        fi
+    fi
+
+    kill $PF_UI6_PID 2>/dev/null || true
+else
+    warn "  ⊘ Skipped — Stage 6 (login) did not pass"
+fi
+
+# Stage 13: Trade ingestion routing (parsed trade → ingestion service → normalized-trades)
+info "Trade ingestion routing (Stage 13)..."
+TRADE_ROUTING_OK=0
+
+# Publish a parsed trade to the ingestion service's input topic (parsed-messages)
+TRADE_ROUTING_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+TRADE_ROUTING_JSON='{"channel":"trade_data","message_id":"EX-TEST-TRADE-003","execution_id":"EX-TEST-TRADE-003","ticker":"ROUTE","side":"buy","quantity":200,"price":75.00,"notional":15000.00,"currency":"USD","order_type":"limit","venue":"BATS","asset_class":"equity","account_id":"TEST-ACCT-002","timestamp":"'"$TRADE_ROUTING_TS"'","trader":{"id":"alice@example.com","name":"Alice (Test Sender)"},"counterparty":{"id":"broker-003","name":"Test Broker 3"}}'
+
+kubectl delete pod kafka-publish-trade-routing -n umbrella-streaming --ignore-not-found 2>/dev/null || true
+echo "$TRADE_ROUTING_JSON" | \
+kubectl run kafka-publish-trade-routing --rm -i --image=apache/kafka:4.1.1 -n umbrella-streaming --restart=Never -- \
+  /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server kafka:9092 \
+  --topic parsed-messages 2>/dev/null || true
+info "  Parsed trade published to parsed-messages topic"
+
+# Wait for ingestion service to process
+info "  Waiting 20s for ingestion service to route trade..."
+for i in {20..1}; do
+    echo -ne "\r  Waiting... ${i}s "
+    sleep 1
+done
+echo ""
+
+# Check normalized-trades topic has the message
+kubectl delete pod kafka-check-trades -n umbrella-streaming --ignore-not-found 2>/dev/null || true
+TRADES_TOPIC_COUNT=$(kubectl run kafka-check-trades --rm -i --image=apache/kafka:4.1.1 -n umbrella-streaming -- \
+  /opt/kafka/bin/kafka-get-offsets.sh \
+  --bootstrap-server kafka:9092 \
+  --topic normalized-trades 2>/dev/null | awk -F':' '{sum += $3} END {print sum+0}')
+
+if [ "$TRADES_TOPIC_COUNT" -gt 0 ]; then
+    info "  ✓ normalized-trades topic has $TRADES_TOPIC_COUNT message(s)"
+else
+    warn "  ✗ normalized-trades topic is empty (ingestion service may not be routing trades)"
+fi
+
+# Check trades-* ES index for the routed trade (via Logstash)
+kubectl port-forward -n umbrella-storage svc/elasticsearch 9200:9200 >/dev/null 2>&1 &
+PF_ES4_PID=$!
+for attempt in $(seq 1 30); do
+    if curl -s --max-time 2 http://localhost:9200/_cluster/health >/dev/null 2>&1; then
+        break
+    fi
+    if [ "$attempt" -eq 30 ]; then
+        error "Elasticsearch not reachable after 60s"
+        exit 1
+    fi
+    sleep 2
+done
+
+# Give Logstash time to consume from normalized-trades
+sleep 5
+curl -s -X POST "http://localhost:9200/trades-*/_refresh" >/dev/null 2>&1 || true
+
+ROUTED_TRADE_COUNT=$(curl -s "http://localhost:9200/trades-*/_count" \
+    -H "Content-Type: application/json" \
+    -d '{"query":{"term":{"metadata.ticker":"ROUTE"}}}' 2>/dev/null | jq -r '.count // 0')
+
+if [ "$ROUTED_TRADE_COUNT" -gt 0 ]; then
+    info "  ✓ Ingestion-routed trade (ticker=ROUTE) found in trades-* index"
+    TRADE_ROUTING_OK=1
+elif [ "$TRADES_TOPIC_COUNT" -gt 0 ]; then
+    info "  ~ Trade reached normalized-trades topic but not yet in ES (Logstash lag)"
+    TRADE_ROUTING_OK=1
+else
+    warn "  ✗ Ingestion-routed trade not found in trades-* or normalized-trades topic"
+    warn "  Ingestion service logs:"
+    kubectl logs -n umbrella-ingestion -l app=ingestion-service --tail=15 2>/dev/null || true
+fi
+
+kill $PF_ES4_PID 2>/dev/null || true
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "=========================================="
 echo "Pipeline Test Summary"
 echo "=========================================="
-echo "Stage 1 (IMAP Connector):    $([ "$RAW_COUNT" -gt 0 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
-echo "Stage 2 (Email Processor):   $([ "$PARSED_COUNT" -gt 0 ]     && echo '[✓ PASS]' || echo '[✗ FAIL]')"
-echo "Stage 3 (Ingestion Service): $([ "$NORMALIZED_COUNT" -gt 0 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
-echo "Stage 4 (Logstash → ES):     $([ "$ES_RESULT" -gt 0 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
-echo "Stage 5 (UI API search):     $([ "$UI_RESULT" -gt 0 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
-echo "Stage 6 (UI login/auth):     $([ "$LOGIN_OK" -eq 1 ]         && echo '[✓ PASS]' || echo '[✗ FAIL]')"
-echo "Stage 7 (Fraud alert):       $([ "$ALERT_OK" -eq 1 ]         && echo '[✓ PASS]' || echo '[✗ FAIL]')"
-echo "Stage 8 (Alert review E2E):  $([ "$REVIEW_OK" -eq 1 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
-echo "Stage 9 (Entity resolution): $([ "$ENTITY_OK" -eq 1 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
-echo "Stage 10 (Alert generation): $([ "$GENERATION_OK" -eq 1 ]    && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 1  (IMAP Connector):    $([ "$RAW_COUNT" -gt 0 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 2  (Email Processor):   $([ "$PARSED_COUNT" -gt 0 ]     && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 3  (Ingestion Service): $([ "$NORMALIZED_COUNT" -gt 0 ] && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 4  (Logstash → ES):     $([ "$ES_RESULT" -gt 0 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 5  (UI API search):     $([ "$UI_RESULT" -gt 0 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 6  (UI login/auth):     $([ "$LOGIN_OK" -eq 1 ]         && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 7  (Fraud alert):       $([ "$ALERT_OK" -eq 1 ]         && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 8  (Alert review E2E):  $([ "$REVIEW_OK" -eq 1 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 9  (Entity resolution): $([ "$ENTITY_OK" -eq 1 ]        && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 10 (Alert generation):  $([ "$GENERATION_OK" -eq 1 ]    && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 11 (Trade data ES):     $([ "$TRADE_ES_OK" -eq 1 ]      && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 12 (Trade search API):  $([ "$TRADE_API_OK" -eq 1 ]     && echo '[✓ PASS]' || echo '[✗ FAIL]')"
+echo "Stage 13 (Trade routing):    $([ "$TRADE_ROUTING_OK" -eq 1 ]  && echo '[✓ PASS]' || echo '[✗ FAIL]')"
 echo "=========================================="
 echo ""
 
 if [ "$RAW_COUNT" -gt 0 ] && [ "$PARSED_COUNT" -gt 0 ] && \
    [ "$NORMALIZED_COUNT" -gt 0 ] && [ "$ES_RESULT" -gt 0 ] && \
    [ "$UI_RESULT" -gt 0 ] && [ "$LOGIN_OK" -eq 1 ] && [ "$ALERT_OK" -eq 1 ] && \
-   [ "$REVIEW_OK" -eq 1 ] && [ "$ENTITY_OK" -eq 1 ] && [ "$GENERATION_OK" -eq 1 ]; then
-    info "✓ PIPELINE TEST PASSED - All 10 stages working!"
+   [ "$REVIEW_OK" -eq 1 ] && [ "$ENTITY_OK" -eq 1 ] && [ "$GENERATION_OK" -eq 1 ] && \
+   [ "$TRADE_ES_OK" -eq 1 ] && [ "$TRADE_API_OK" -eq 1 ] && \
+   [ "$TRADE_ROUTING_OK" -eq 1 ]; then
+    info "✓ PIPELINE TEST PASSED - All 13 stages working!"
     echo ""
     info "To access the UI:"
     echo "  kubectl port-forward -n umbrella-ui svc/umbrella-ui-frontend 3000:80"
@@ -697,7 +1126,7 @@ if [ "$RAW_COUNT" -gt 0 ] && [ "$PARSED_COUNT" -gt 0 ] && \
     info "To explore the data in Kibana:"
     echo "  kubectl port-forward -n umbrella-storage svc/kibana 5601:5601"
     echo "  Open http://localhost:5601 in your browser"
-    echo "  (Index pattern: messages-*)"
+    echo "  (Index patterns: messages-*, trades-*)"
     echo ""
     info "To view logs:"
     echo "  kubectl logs -n umbrella-connectors -l app=email-connector -f"

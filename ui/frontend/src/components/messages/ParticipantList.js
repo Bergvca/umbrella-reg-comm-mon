@@ -1,5 +1,6 @@
-import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useState, useRef, useEffect } from "react";
+import { Link } from "react-router";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 const ROLE_CLASSES = {
@@ -8,7 +9,8 @@ const ROLE_CLASSES = {
     cc: "text-muted-foreground border-muted",
 };
 function ParticipantChip({ participant: p }) {
-    return (_jsxs("span", { className: "inline-flex items-center gap-1.5 text-sm whitespace-nowrap", children: [_jsx(Badge, { variant: "outline", className: `text-xs ${ROLE_CLASSES[p.role] ?? "text-muted-foreground"}`, children: p.role }), _jsx("span", { className: "font-medium", children: p.name }), p.id && p.id !== p.name && (_jsxs("span", { className: "text-muted-foreground", children: ["(", p.id, ")"] }))] }));
+    const nameContent = (_jsxs(_Fragment, { children: [_jsx("span", { className: "font-medium", children: p.name }), p.id && p.id !== p.name && (_jsxs("span", { className: "text-muted-foreground", children: ["(", p.id, ")"] }))] }));
+    return (_jsxs("span", { className: "inline-flex items-center gap-1.5 text-sm whitespace-nowrap", children: [_jsx(Badge, { variant: "outline", className: `text-xs ${ROLE_CLASSES[p.role] ?? "text-muted-foreground"}`, children: p.role }), p.entity_id ? (_jsx(Link, { to: `/entities/${p.entity_id}`, className: "inline-flex items-center gap-1 underline decoration-dotted hover:decoration-solid", children: nameContent })) : (nameContent)] }));
 }
 export function ParticipantList({ participants }) {
     const [expanded, setExpanded] = useState(false);

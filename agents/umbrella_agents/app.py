@@ -46,9 +46,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
 
     # Import tool modules to trigger registration with the global registry
+    import umbrella_agents.tools.alert_lookup  # noqa: F401
+    import umbrella_agents.tools.entity_lookup  # noqa: F401
     import umbrella_agents.tools.es_get_mapping  # noqa: F401
     import umbrella_agents.tools.es_search  # noqa: F401
     import umbrella_agents.tools.sql_query  # noqa: F401
+    import umbrella_agents.tools.trade_correlation  # noqa: F401
+    import umbrella_agents.tools.trade_search  # noqa: F401
 
     from umbrella_agents.routers.execute import router as execute_router
     from umbrella_agents.routers.health import router as health_router

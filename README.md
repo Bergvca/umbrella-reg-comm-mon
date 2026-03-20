@@ -243,6 +243,51 @@ A centralized gateway that normalizes incoming parsed data into a unified schema
 - **PostgreSQL**: Application state — users, policies, agent configurations, entities, audit log.
 - **S3**: Long-term retention of raw, normalized, and processed data.
 
+## Getting Started
+
+### OpenRouter API Key (LLM Access)
+
+The AI agent layer uses [OpenRouter](https://openrouter.ai/) to route LLM requests to models like Claude, Gemini, and others. You need an API key for agents to work.
+
+1. **Create an account** at [openrouter.ai](https://openrouter.ai/) and generate an API key from the [Keys page](https://openrouter.ai/keys).
+
+2. **Load the key into PostgreSQL.** The agent runtime reads API keys from the `agent.models` table. The seed migration (`V11`) inserts a placeholder — update it with your real key:
+
+   ```sql
+   UPDATE agent.models
+   SET    api_key_secret = 'sk-or-v1-YOUR_KEY_HERE'
+   WHERE  base_url = 'https://openrouter.ai/api/v1';
+   ```
+
+   This updates all OpenRouter-backed models in one statement.
+
+3. **Load the key into the Kubernetes secret** (if running on K8s). The agent runtime deployment also reads the key from a secret:
+
+   ```bash
+   # Encode the key
+   KEY_B64=$(echo -n 'sk-or-v1-YOUR_KEY_HERE' | base64 -w0)
+
+   # Patch the secret
+   kubectl get secret umbrella-agent-runtime-credentials -n umbrella-ui -o json \
+     | jq --arg k "$KEY_B64" '.data.OPENROUTER_API_KEY = $k' \
+     | kubectl apply -f -
+
+   # Restart the agent runtime to pick up the new secret
+   kubectl rollout restart deployment/umbrella-agent-runtime -n umbrella-ui
+   ```
+
+4. **Verify the key works:**
+
+   ```bash
+   curl -s https://openrouter.ai/api/v1/chat/completions \
+     -H "Authorization: Bearer sk-or-v1-YOUR_KEY_HERE" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"anthropic/claude-sonnet-4-6","messages":[{"role":"user","content":"ping"}],"max_tokens":5}' \
+     | jq .choices[0].message.content
+   ```
+
+   If you get a response (e.g. `"Pong!"`), the key is valid. A `401` error means the key is expired or invalid.
+
 ## Development Setup
 
 The project uses `uv` for Python environment management.
